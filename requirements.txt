@@ -1,0 +1,7 @@
+# [job-queue] = cài kèm APScheduler để dùng JobQueue (lập lịch nhắc việc, báo cáo)
+python-telegram-bot[job-queue]==21.4
+anthropic==0.34.2
+python-dotenv==1.0.1
+# anthropic 0.34.2 chưa tương thích httpx >= 0.28 (httpx bỏ tham số proxies),
+# nên phải ghim httpx ở 0.27.x
+httpx==0.27.2
