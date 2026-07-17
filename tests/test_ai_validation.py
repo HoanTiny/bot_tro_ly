@@ -61,7 +61,30 @@ def test_truong_date_sai_bi_bo_nhung_khoan_chi_van_giu():
 # ── Validate lời nhắc ─────────────────────────────────────────────────────
 def test_loi_nhac_hop_le():
     data = {"content": "họp", "remind_at": "2099-01-01 08:00"}
-    assert validate_reminder(data) == data
+    result = validate_reminder(data)
+    assert result["content"] == "họp"
+    assert result["repeat"] == "once"  # không nói gì -> mặc định nhắc 1 lần
+
+
+def test_loi_nhac_lap_lai():
+    data = {"content": "uống thuốc", "remind_at": "2099-01-01 08:00", "repeat": "daily"}
+    assert validate_reminder(data)["repeat"] == "daily"
+    # repeat lạ -> hạ về "once" chứ không vứt cả lời nhắc
+    data["repeat"] = "monthly"
+    assert validate_reminder(data)["repeat"] == "once"
+
+
+def test_khoan_thu():
+    thu = [{"item": "nhận lương", "amount": 15000000, "category": "thu nhập", "type": "thu"}]
+    assert validate_expenses(thu)[0]["type"] == "thu"
+    # Khoản thu phải thuộc nhóm "thu nhập", khoản chi thì không được dùng nhóm đó
+    sai1 = [{"item": "lương", "amount": 1000, "category": "ăn uống", "type": "thu"}]
+    sai2 = [{"item": "ăn sáng", "amount": 1000, "category": "thu nhập", "type": "chi"}]
+    assert validate_expenses(sai1) == []
+    assert validate_expenses(sai2) == []
+    # Không có trường type -> mặc định là chi
+    mac_dinh = [{"item": "ăn sáng", "amount": 15000, "category": "ăn uống"}]
+    assert validate_expenses(mac_dinh)[0]["type"] == "chi"
 
 
 def test_loi_nhac_khong_hop_le():

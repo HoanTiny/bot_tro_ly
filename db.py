@@ -23,6 +23,20 @@ def _connect() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """Migration: thêm cột vào bảng ĐANG CÓ DỮ LIỆU nếu cột chưa tồn tại.
+
+    CREATE TABLE IF NOT EXISTS chỉ tạo bảng mới, KHÔNG sửa bảng cũ — muốn
+    thêm cột vào bảng cũ phải ALTER TABLE. Dòng DEFAULT trong decl đảm bảo
+    các dòng dữ liệu cũ tự nhận giá trị mặc định (vd: khoản chi cũ -> 'chi').
+    Đây là dạng đơn giản nhất của "database migration" — kỹ thuật bắt buộc
+    khi ứng dụng đã có người dùng thật.
+    """
+    columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init_db() -> None:
     """Tạo bảng messages nếu chưa có. Gọi 1 lần khi bot khởi động.
 
@@ -116,6 +130,11 @@ def init_db() -> None:
             )
             """
         )
+        # Migration cho database đã có dữ liệu:
+        # - expenses.kind: 'chi' (tiền ra) hoặc 'thu' (tiền vào)
+        # - reminders.repeat: 'once' / 'daily' / 'weekly'
+        _add_column_if_missing(conn, "expenses", "kind", "TEXT NOT NULL DEFAULT 'chi'")
+        _add_column_if_missing(conn, "reminders", "repeat", "TEXT NOT NULL DEFAULT 'once'")
 
 
 def add_message(chat_id: int, role: str, content: str) -> None:
@@ -211,39 +230,45 @@ def delete_note(chat_id: int, note_id: int) -> bool:
 
 # ── Chi tiêu (/chi, /chitieu) ─────────────────────────────────────────────
 def add_expense(
-    chat_id: int, item: str, amount: int, category: str, created_at: str | None = None
+    chat_id: int,
+    item: str,
+    amount: int,
+    category: str,
+    created_at: str | None = None,
+    kind: str = "chi",
 ) -> int:
-    """Lưu 1 khoản chi, trả về id vừa tạo.
+    """Lưu 1 khoản thu/chi, trả về id vừa tạo.
 
+    kind: 'chi' (tiền ra) hoặc 'thu' (tiền vào — lương, thưởng, bán đồ...).
     created_at: thời điểm UTC "YYYY-MM-DD HH:MM:SS" — chỉ truyền khi ghi lùi
     ngày ("hôm qua ăn tối 200k"). Bỏ trống thì SQLite tự điền thời điểm bây giờ.
     """
     with _connect() as conn:
         if created_at is None:
             cursor = conn.execute(
-                "INSERT INTO expenses (chat_id, item, amount, category) VALUES (?, ?, ?, ?)",
-                (chat_id, item, amount, category),
+                "INSERT INTO expenses (chat_id, item, amount, category, kind) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, item, amount, category, kind),
             )
         else:
             cursor = conn.execute(
-                "INSERT INTO expenses (chat_id, item, amount, category, created_at) VALUES (?, ?, ?, ?, ?)",
-                (chat_id, item, amount, category, created_at),
+                "INSERT INTO expenses (chat_id, item, amount, category, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (chat_id, item, amount, category, kind, created_at),
             )
         return cursor.lastrowid
 
 
-def get_month_expenses(chat_id: int, year_month: str) -> list[tuple[str, int, str, str]]:
-    """Các khoản chi trong 1 tháng, mới nhất trước. year_month dạng "2026-07".
+def get_month_expenses(chat_id: int, year_month: str) -> list[tuple[str, int, str, str, str]]:
+    """Các khoản thu/chi trong 1 tháng, mới nhất trước. year_month dạng "2026-07".
 
     strftime('%Y-%m', ...) cắt phần năm-tháng từ created_at để so sánh —
     đây là cách lọc dữ liệu theo tháng phổ biến trong SQLite.
-    Trả về [(item, amount, category, "ngày/tháng"), ...].
+    Trả về [(item, amount, category, "ngày/tháng", kind), ...].
     """
     with _connect() as conn:
         return conn.execute(
             """
             SELECT item, amount, category,
-                   strftime('%d/%m', datetime(created_at, 'localtime'))
+                   strftime('%d/%m', datetime(created_at, 'localtime')), kind
             FROM expenses
             WHERE chat_id = ?
               AND strftime('%Y-%m', datetime(created_at, 'localtime')) = ?
@@ -251,6 +276,21 @@ def get_month_expenses(chat_id: int, year_month: str) -> list[tuple[str, int, st
             """,
             (chat_id, year_month),
         ).fetchall()
+
+
+def get_month_income(chat_id: int, year_month: str) -> int:
+    """Tổng tiền THU trong 1 tháng. COALESCE: SUM trả NULL khi không có dòng
+    nào -> đổi thành 0 để bên gọi không phải xử lý None."""
+    with _connect() as conn:
+        (total,) = conn.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) FROM expenses
+            WHERE chat_id = ? AND kind = 'thu'
+              AND strftime('%Y-%m', datetime(created_at, 'localtime')) = ?
+            """,
+            (chat_id, year_month),
+        ).fetchone()
+        return total
 
 
 def get_summary_between(chat_id: int, start_date: str, end_date: str) -> list[tuple[str, int]]:
@@ -264,7 +304,7 @@ def get_summary_between(chat_id: int, start_date: str, end_date: str) -> list[tu
             """
             SELECT category, SUM(amount)
             FROM expenses
-            WHERE chat_id = ?
+            WHERE chat_id = ? AND kind = 'chi'
               AND date(datetime(created_at, 'localtime')) BETWEEN ? AND ?
             GROUP BY category
             ORDER BY SUM(amount) DESC
@@ -297,7 +337,7 @@ def get_month_summary(chat_id: int, year_month: str) -> list[tuple[str, int]]:
             """
             SELECT category, SUM(amount)
             FROM expenses
-            WHERE chat_id = ?
+            WHERE chat_id = ? AND kind = 'chi'
               AND strftime('%Y-%m', datetime(created_at, 'localtime')) = ?
             GROUP BY category
             ORDER BY SUM(amount) DESC
@@ -307,28 +347,41 @@ def get_month_summary(chat_id: int, year_month: str) -> list[tuple[str, int]]:
 
 
 # ── Lời nhắc (/remind) ────────────────────────────────────────────────────
-def add_reminder(chat_id: int, content: str, remind_at: str) -> int:
-    """Lưu 1 lời nhắc, remind_at dạng "YYYY-MM-DD HH:MM" giờ địa phương."""
+def add_reminder(chat_id: int, content: str, remind_at: str, repeat: str = "once") -> int:
+    """Lưu 1 lời nhắc, remind_at dạng "YYYY-MM-DD HH:MM" giờ địa phương.
+
+    repeat: 'once' (nhắc 1 lần), 'daily' (mỗi ngày), 'weekly' (mỗi tuần).
+    """
     with _connect() as conn:
         cursor = conn.execute(
-            "INSERT INTO reminders (chat_id, content, remind_at) VALUES (?, ?, ?)",
-            (chat_id, content, remind_at),
+            "INSERT INTO reminders (chat_id, content, remind_at, repeat) VALUES (?, ?, ?, ?)",
+            (chat_id, content, remind_at, repeat),
         )
         return cursor.lastrowid
 
 
-def get_due_reminders(now: str) -> list[tuple[int, int, str]]:
+def get_due_reminders(now: str) -> list[tuple[int, int, str, str, str]]:
     """Các lời nhắc ĐÃ ĐẾN GIỜ mà chưa gửi. now dạng "YYYY-MM-DD HH:MM".
 
     So sánh chuỗi remind_at <= now hoạt động đúng vì định dạng có số 0 đệm
     (ví dụ "2026-07-16 08:05" < "2026-07-16 10:30" cả về chuỗi lẫn thời gian).
-    Trả về [(id, chat_id, content), ...].
+    Trả về [(id, chat_id, content, repeat, remind_at), ...].
     """
     with _connect() as conn:
         return conn.execute(
-            "SELECT id, chat_id, content FROM reminders WHERE sent = 0 AND remind_at <= ?",
+            "SELECT id, chat_id, content, repeat, remind_at FROM reminders "
+            "WHERE sent = 0 AND remind_at <= ?",
             (now,),
         ).fetchall()
+
+
+def reschedule_reminder(reminder_id: int, next_remind_at: str) -> None:
+    """Dời lời nhắc lặp lại sang lần kế tiếp (giữ sent = 0 để còn nhắc tiếp)."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE reminders SET remind_at = ? WHERE id = ?",
+            (next_remind_at, reminder_id),
+        )
 
 
 def mark_reminder_sent(reminder_id: int) -> None:
@@ -338,12 +391,13 @@ def mark_reminder_sent(reminder_id: int) -> None:
         conn.execute("UPDATE reminders SET sent = 1 WHERE id = ?", (reminder_id,))
 
 
-def get_pending_reminders(chat_id: int) -> list[tuple[int, str, str]]:
-    """Các lời nhắc sắp tới của một người, gần nhất trước. [(id, content, remind_at), ...]"""
+def get_pending_reminders(chat_id: int) -> list[tuple[int, str, str, str]]:
+    """Các lời nhắc sắp tới của một người, gần nhất trước.
+    [(id, content, remind_at, repeat), ...]"""
     with _connect() as conn:
         return conn.execute(
             """
-            SELECT id, content, remind_at FROM reminders
+            SELECT id, content, remind_at, repeat FROM reminders
             WHERE chat_id = ? AND sent = 0
             ORDER BY remind_at
             """,

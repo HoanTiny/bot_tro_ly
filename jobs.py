@@ -21,12 +21,25 @@ async def check_reminders_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     nên bot có tắt đi bật lại cũng không quên (job trong RAM thì quên sạch).
     Nhắc trễ tối đa 30 giây — chấp nhận được với nhắc việc cá nhân.
     """
-    due = db.get_due_reminders(datetime.now().strftime("%Y-%m-%d %H:%M"))
-    for reminder_id, chat_id, content in due:
+    now = datetime.now()
+    due = db.get_due_reminders(now.strftime("%Y-%m-%d %H:%M"))
+    for reminder_id, chat_id, content, repeat, remind_at in due:
         try:
-            await context.bot.send_message(chat_id, f"🔔 Nhắc bạn: {content}")
-            # Chỉ đánh dấu đã gửi khi gửi THÀNH CÔNG — gửi lỗi thì 30s sau thử lại
-            db.mark_reminder_sent(reminder_id)
+            tag = {"daily": " (mỗi ngày)", "weekly": " (mỗi tuần)"}.get(repeat, "")
+            await context.bot.send_message(chat_id, f"🔔 Nhắc bạn: {content}{tag}")
+            # Chỉ xử lý tiếp khi gửi THÀNH CÔNG — gửi lỗi thì 30s sau thử lại
+            if repeat == "once":
+                db.mark_reminder_sent(reminder_id)
+            else:
+                # Lời nhắc lặp: dời sang lần kế tiếp thay vì đánh dấu xong.
+                # Cộng dồn từ remind_at CŨ (không phải từ "bây giờ") để giữ
+                # nguyên giờ gốc (8:00 mãi là 8:00); vòng while phòng khi máy
+                # ngủ nhiều ngày — cộng tới khi nào rơi vào tương lai mới thôi.
+                step = timedelta(days=1) if repeat == "daily" else timedelta(days=7)
+                next_at = datetime.strptime(remind_at, "%Y-%m-%d %H:%M") + step
+                while next_at <= now:
+                    next_at += step
+                db.reschedule_reminder(reminder_id, next_at.strftime("%Y-%m-%d %H:%M"))
         except Exception:
             logger.exception("Lỗi khi gửi lời nhắc #%s", reminder_id)
 

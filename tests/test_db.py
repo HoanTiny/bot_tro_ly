@@ -100,6 +100,36 @@ def test_tong_chi_theo_khoang_ngay():
     assert db.get_summary_between(111, "2020-01-01", "2020-01-07") == []
 
 
+def test_tien_thu_va_can_doi():
+    """Khoản thu không được lẫn vào tổng chi theo nhóm, và tính riêng được."""
+    db.add_expense(111, "ăn sáng", 15000, "ăn uống")  # kind mặc định 'chi'
+    db.add_expense(111, "nhận lương", 15000000, "thu nhập", kind="thu")
+
+    month = datetime.now().strftime("%Y-%m")
+    # Tổng chi theo nhóm KHÔNG chứa khoản thu
+    assert dict(db.get_month_summary(111, month)) == {"ăn uống": 15000}
+    # Tổng thu tính riêng
+    assert db.get_month_income(111, month) == 15000000
+    assert db.get_month_income(111, "2020-01") == 0  # tháng không có gì -> 0
+    # Danh sách chi tiết chứa cả hai, kèm kind
+    kinds = {row[4] for row in db.get_month_expenses(111, month)}
+    assert kinds == {"chi", "thu"}
+
+
+def test_nhac_lap_lai_doi_lich():
+    """Lời nhắc lặp: sau khi dời lịch vẫn sent=0 và remind_at mới."""
+    rid = db.add_reminder(111, "uống thuốc", "2020-01-01 08:00", repeat="daily")
+
+    due = db.get_due_reminders("2026-01-01 00:00")
+    assert due[0][3] == "daily" and due[0][4] == "2020-01-01 08:00"
+
+    db.reschedule_reminder(rid, "2099-01-02 08:00")
+    # Không còn đến hạn, nhưng vẫn nằm trong danh sách sắp tới (sent = 0)
+    assert db.get_due_reminders("2026-01-01 00:00") == []
+    pending = db.get_pending_reminders(111)
+    assert pending[0][2] == "2099-01-02 08:00" and pending[0][3] == "daily"
+
+
 def test_chi_tieu_ghi_lui_ngay():
     """Khoản chi "hôm qua" phải xuất hiện đúng ngày hôm qua trong mọi truy vấn."""
     from datetime import timedelta

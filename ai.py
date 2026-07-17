@@ -34,27 +34,35 @@ claude_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 # để code parse được. Chú ý các kỹ thuật: nói rõ "DUY NHẤT JSON", cho ví dụ
 # cụ thể, liệt kê giá trị được phép, và quy định trường hợp thất bại ([]).
 EXTRACT_SYSTEM_PROMPT = (
-    "Bạn là công cụ bóc tách chi tiêu từ tin nhắn tiếng Việt.\n"
+    "Bạn là công cụ bóc tách các khoản TIỀN RA (chi) và TIỀN VÀO (thu) từ tin nhắn tiếng Việt.\n"
     "Trả về DUY NHẤT một mảng JSON, không giải thích, không markdown.\n"
-    'Mỗi khoản chi là một phần tử: {"item": "tên khoản chi", "amount": <số tiền VND, số nguyên>, "category": "<nhóm>"}\n'
-    f"category chỉ được chọn một trong: {', '.join(EXPENSE_CATEGORIES)}.\n"
-    "Hiểu cách viết tiền kiểu Việt Nam: 15k = 15000, 2tr = 2000000, 1tr2 = 1200000.\n"
-    'Ví dụ: "ăn sáng 15k, đổ xăng 50k" -> '
-    '[{"item": "ăn sáng", "amount": 15000, "category": "ăn uống"}, '
-    '{"item": "đổ xăng", "amount": 50000, "category": "đi lại"}]\n'
-    "CHỈ tính khi người dùng thông báo ĐÃ chi tiền. Hỏi giá, so sánh, dự định mua, "
-    "hay nhắc tới tiền trong câu chuyện chung KHÔNG phải khoản chi.\n"
-    'Nếu người dùng nói rõ chi vào lúc khác ("hôm qua", "thứ 2 vừa rồi", "hôm 12/7"), '
-    'thêm trường "date": "YYYY-MM-DD" vào khoản chi đó. Không nhắc gì đến thời điểm '
+    'Mỗi khoản là một phần tử: {"item": "tên khoản", "amount": <số tiền VND, số nguyên>, '
+    '"category": "<nhóm>", "type": "chi" hoặc "thu"}\n'
+    '- type "chi": tiền ra (mua, ăn, trả, đóng, nạp...). '
+    f"category chọn một trong: {', '.join(EXPENSE_CATEGORIES)}.\n"
+    '- type "thu": tiền vào (nhận lương, thưởng, được cho, bán đồ, hoàn tiền, trúng...). '
+    'category luôn là "thu nhập".\n'
+    "Cách nói tiền kiểu Việt Nam:\n"
+    "- 15k = 15000; 37k5 = 37500; 2tr = 2000000; 1tr2 = 1200000; 1tr rưỡi = 1500000\n"
+    "- 200 nghìn/ngàn = 200000; 5 lít = 5 xị = 500000 (1 lít/xị = 100 nghìn)\n"
+    "- 2 củ = 2 chai = 2000000 (1 củ/chai = 1 triệu); nửa củ = 500000\n"
+    'Ví dụ: "ăn sáng 15k, nhận lương 15tr" -> '
+    '[{"item": "ăn sáng", "amount": 15000, "category": "ăn uống", "type": "chi"}, '
+    '{"item": "nhận lương", "amount": 15000000, "category": "thu nhập", "type": "thu"}]\n'
+    "CHỈ tính khi tiền ĐÃ thực sự ra/vào. Hỏi giá, so sánh, dự định mua, "
+    "hay nhắc tới tiền trong câu chuyện chung KHÔNG tính.\n"
+    'Nếu người dùng nói rõ thời điểm khác ("hôm qua", "thứ 2 vừa rồi", "hôm 12/7"), '
+    'thêm trường "date": "YYYY-MM-DD". Không nhắc gì đến thời điểm '
     "thì BỎ trường date (mặc định là hôm nay).\n"
-    "Nếu tin nhắn không chứa khoản chi nào rõ ràng, trả về []."
+    "Nếu tin nhắn không chứa khoản thu/chi nào rõ ràng, trả về []."
 )
 
-# Bộ lọc rẻ trước khi gọi AI đắt: tin nhắn phải có "mùi tiền" (15k, 2tr,
-# 50.000đ, 200 nghìn...) thì mới đáng gọi Claude bóc tách. Nhờ vậy tin nhắn
-# chat thường không tốn thêm lệnh gọi API nào.
+# Bộ lọc rẻ trước khi gọi AI đắt: tin nhắn phải có "mùi tiền" (15k, 37k5,
+# 2tr, 50.000đ, 200 nghìn, 2 củ...) thì mới đáng gọi Claude bóc tách.
+# k\d* / tr\d* bắt được cả kiểu viết dính số: "37k5", "1tr2".
 MONEY_HINT = re.compile(
-    r"\d[\d.,]*\s*(k|tr|triệu|nghìn|ngàn|đồng|đ|d|vnd)\b",
+    r"\d[\d.,]*\s*(k\d*|tr\d*|triệu|nghìn|ngàn|đồng|đ|d|vnd|củ|chai|lít|xị)\b"
+    r"|nửa\s+(củ|chai|triệu|tr)\b",  # "nửa củ" không có chữ số nhưng vẫn là tiền
     re.IGNORECASE,
 )
 
@@ -142,15 +150,26 @@ def run_tool(chat_id: int, tool_name: str, tool_input: dict) -> str:
 
     if tool_name == "expense_summary":
         summary = db.get_month_summary(chat_id, year_month)
+        total_chi = sum(a for _, a in summary)
+        total_thu = db.get_month_income(chat_id, year_month)
         return json.dumps(
-            {"month": year_month, "total": sum(a for _, a in summary), "by_category": dict(summary)},
+            {
+                "month": year_month,
+                "tổng_chi": total_chi,
+                "tổng_thu": total_thu,
+                "cân_đối": total_thu - total_chi,
+                "chi_theo_nhóm": dict(summary),
+            },
             ensure_ascii=False,
         )
 
     if tool_name == "expense_list":
         rows = db.get_month_expenses(chat_id, year_month)
         return json.dumps(
-            [{"item": i, "amount": a, "category": c, "day": d} for i, a, c, d in rows],
+            [
+                {"item": i, "amount": a, "category": c, "day": d, "kind": k}
+                for i, a, c, d, k in rows
+            ],
             ensure_ascii=False,
         )
 
@@ -275,13 +294,18 @@ def validate_expenses(data: list) -> list[dict]:
     """
     valid = []
     for e in data:
+        # type: 'chi' (mặc định) hoặc 'thu'; khoản thu có nhóm riêng "thu nhập"
+        kind = e.get("type", "chi") if isinstance(e, dict) else "chi"
+        allowed_categories = ["thu nhập"] if kind == "thu" else EXPENSE_CATEGORIES
         if not (
             isinstance(e, dict)
+            and kind in ("chi", "thu")
             and isinstance(e.get("item"), str) and e["item"].strip()
             and isinstance(e.get("amount"), int) and e["amount"] > 0
-            and e.get("category") in EXPENSE_CATEGORIES
+            and e.get("category") in allowed_categories
         ):
             continue
+        e["type"] = kind  # điền mặc định nếu Claude bỏ trống
         # Trường date (tùy chọn): phải đúng định dạng và không ở tương lai —
         # sai thì chỉ bỏ trường date (coi như chi hôm nay), vẫn giữ khoản chi
         if "date" in e:
@@ -308,7 +332,11 @@ async def extract_reminder(text: str) -> dict | None:
     system = (
         "Bạn là công cụ bóc tách lời nhắc từ tin nhắn tiếng Việt.\n"
         f"Bây giờ là {now.strftime('%Y-%m-%d %H:%M')}, {weekdays[now.weekday()]}.\n"
-        'Trả về DUY NHẤT một JSON: {"content": "<việc cần nhắc>", "remind_at": "YYYY-MM-DD HH:MM"}\n'
+        'Trả về DUY NHẤT một JSON: {"content": "<việc cần nhắc>", "remind_at": "YYYY-MM-DD HH:MM", '
+        '"repeat": "once" | "daily" | "weekly"}\n'
+        "repeat: \"daily\" khi nói 'mỗi ngày/hằng ngày/mỗi sáng/mỗi tối...', "
+        "\"weekly\" khi nói 'mỗi tuần/thứ 2 hằng tuần...', còn lại là \"once\".\n"
+        "Với lời nhắc lặp lại, remind_at là LẦN NHẮC ĐẦU TIÊN (gần nhất trong tương lai).\n"
         "Quy đổi thời gian tương đối ra thời điểm tuyệt đối: '15 phút nữa', '8h sáng mai', "
         "'tối nay', 'thứ 6 tuần này'... Nếu nói giờ mà không nói ngày, chọn thời điểm "
         "GẦN NHẤT trong tương lai. 'sáng' = 08:00, 'trưa' = 12:00, 'chiều' = 15:00, 'tối' = 20:00 "
@@ -337,7 +365,10 @@ def validate_reminder(data: dict) -> dict | None:
         datetime.strptime(data["remind_at"], "%Y-%m-%d %H:%M")
     except (ValueError, TypeError):
         return None
-    return {"content": str(data["content"]), "remind_at": data["remind_at"]}
+    repeat = data.get("repeat", "once")
+    if repeat not in ("once", "daily", "weekly"):
+        repeat = "once"  # giá trị lạ -> coi như nhắc 1 lần, không vứt cả lời nhắc
+    return {"content": str(data["content"]), "remind_at": data["remind_at"], "repeat": repeat}
 
 
 async def write_weekly_comment(this_week: dict, last_week: dict) -> str:

@@ -30,19 +30,22 @@ def record_expenses(chat_id: int, expenses: list[dict]) -> str:
     for e in expenses:
         # Có trường date (người dùng nói "hôm qua"...) -> ghi lùi về ngày đó
         backdate = e.get("date")
+        kind = e.get("type", "chi")
         db.add_expense(
             chat_id, e["item"], e["amount"], e["category"],
             created_at=local_date_to_utc_timestamp(backdate) if backdate else None,
+            kind=kind,
         )
         day_note = f" — hôm {backdate[8:10]}/{backdate[5:7]}" if backdate else ""
-        lines.append(f"• {e['item']}: {format_money(e['amount'])} ({e['category']}){day_note}")
+        sign = "🟢 +" if kind == "thu" else "🔴 -"
+        lines.append(f"{sign}{format_money(e['amount'])} {e['item']} ({e['category']}){day_note}")
 
-    month_total = sum(
-        amount for _, amount in db.get_month_summary(chat_id, datetime.now().strftime("%Y-%m"))
-    )
+    year_month = datetime.now().strftime("%Y-%m")
+    month_chi = sum(amount for _, amount in db.get_month_summary(chat_id, year_month))
+    month_thu = db.get_month_income(chat_id, year_month)
     return (
         "Đã ghi:\n" + "\n".join(lines)
-        + f"\n\nTổng tháng này: {format_money(month_total)} — xem chi tiết: /chitieu"
+        + f"\n\nTháng này: thu {format_money(month_thu)} — chi {format_money(month_chi)} — xem /chitieu"
     )
 
 
@@ -154,14 +157,24 @@ async def chitieu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     summary = db.get_month_summary(chat_id, year_month)
-    total = sum(amount for _, amount in summary)
+    total_chi = sum(amount for _, amount in summary)
+    total_thu = db.get_month_income(chat_id, year_month)
+    balance = total_thu - total_chi
 
-    lines = [f"Chi tiêu tháng {datetime.now().strftime('%m/%Y')}: {format_money(total)}", ""]
+    lines = [
+        f"Tháng {datetime.now().strftime('%m/%Y')}:",
+        f"🟢 Thu: {format_money(total_thu)}",
+        f"🔴 Chi: {format_money(total_chi)}",
+        f"{'💰' if balance >= 0 else '⚠️'} Cân đối: {'+' if balance >= 0 else '-'}{format_money(abs(balance))}",
+        "",
+        "Chi theo nhóm:",
+    ]
     lines += [f"• {category}: {format_money(amount)}" for category, amount in summary]
 
     lines += ["", "5 khoản gần nhất:"]
-    for item, amount, category, day in rows[:5]:
-        lines.append(f"• {day} — {item}: {format_money(amount)}")
+    for item, amount, category, day, kind in rows[:5]:
+        sign = "+" if kind == "thu" else "-"
+        lines.append(f"• {day} — {item}: {sign}{format_money(amount)}")
 
     await update.message.reply_text("\n".join(lines))
 
@@ -185,7 +198,12 @@ async def baocao_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
-    buffer = report.build_month_report(rows, db.get_month_summary(chat_id, year_month), year_month)
+    buffer = report.build_month_report(
+        rows,
+        db.get_month_summary(chat_id, year_month),
+        year_month,
+        total_income=db.get_month_income(chat_id, year_month),
+    )
     await update.message.reply_document(
         document=buffer,
         filename=f"chi-tieu-{year_month}.xlsx",
@@ -226,10 +244,12 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    reminder_id = db.add_reminder(chat_id, reminder["content"], reminder["remind_at"])
+    repeat = reminder.get("repeat", "once")
+    reminder_id = db.add_reminder(chat_id, reminder["content"], reminder["remind_at"], repeat)
+    repeat_note = {"daily": " (lặp mỗi ngày)", "weekly": " (lặp mỗi tuần)"}.get(repeat, "")
     await update.message.reply_text(
         f"⏰ Đã đặt nhắc #{reminder_id}: {reminder['content']}\n"
-        f"Lúc: {remind_at.strftime('%H:%M %d/%m/%Y')}\n"
+        f"Lúc: {remind_at.strftime('%H:%M %d/%m/%Y')}{repeat_note}\n"
         f"Hủy bằng: /delremind {reminder_id}"
     )
 
@@ -242,9 +262,10 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     lines = []
-    for reminder_id, content, remind_at in pending:
+    for reminder_id, content, remind_at, repeat in pending:
         at = datetime.strptime(remind_at, "%Y-%m-%d %H:%M")
-        lines.append(f"#{reminder_id} — {at.strftime('%H:%M %d/%m')}: {content}")
+        tag = {"daily": " 🔁 mỗi ngày", "weekly": " 🔁 mỗi tuần"}.get(repeat, "")
+        lines.append(f"#{reminder_id} — {at.strftime('%H:%M %d/%m')}: {content}{tag}")
     await update.message.reply_text("Lời nhắc sắp tới:\n" + "\n".join(lines))
 
 
