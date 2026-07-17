@@ -8,18 +8,94 @@ Vì sao dùng SQLite?
 
 Mẹo học: cài "DB Browser for SQLite" (miễn phí) rồi mở file bot.db
 để nhìn thấy dữ liệu bot đang lưu — rất trực quan.
+
+── Chế độ đám mây (Turso) — để chạy bot luân phiên nhiều máy ──────────────
+Điền TURSO_DATABASE_URL + TURSO_AUTH_TOKEN vào .env thì dữ liệu lưu trên
+Turso (SQLite trên mây, miễn phí): mọi thao tác GHI đẩy thẳng lên mây, còn
+ĐỌC vẫn từ file replica cục bộ (nhanh như cũ) — khởi động bot ở máy nào
+cũng tự kéo dữ liệu mới nhất về, không phải copy bot.db qua lại nữa.
+Bỏ trống 2 biến đó thì bot chạy 100% cục bộ với bot.db như bình thường —
+toàn bộ hàm bên dưới không cần biết mình đang ở chế độ nào.
 """
 
+import logging
+import os
 import sqlite3
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()  # tự nạp .env — db.py có thể được import trước config.py
+
+logger = logging.getLogger(__name__)
 
 # File database nằm cùng thư mục với code, dù bạn chạy bot từ đâu
 DB_PATH = Path(__file__).parent / "bot.db"
 
+# Cấu hình Turso — có đủ cả 2 biến thì bật chế độ đám mây
+TURSO_URL = os.getenv("TURSO_DATABASE_URL")
+TURSO_TOKEN = os.getenv("TURSO_AUTH_TOKEN")
 
-def _connect() -> sqlite3.Connection:
-    """Mở kết nối tới database. Mỗi thao tác mở/đóng một kết nối riêng —
-    đơn giản và an toàn cho bot nhỏ (SQLite mở kết nối rất nhanh)."""
+# Replica cục bộ của Turso — CỐ Ý khác tên bot.db: file replica có metadata
+# đồng bộ riêng, không mở lẫn với file SQLite thường được
+REPLICA_PATH = Path(__file__).parent / "bot_turso.db"
+
+# Kết nối Turso dùng chung cho cả tiến trình — mở 1 lần rồi giữ, vì mỗi lần
+# mở là một lượt bắt tay với server trên mây (chậm hơn mở file cục bộ nhiều)
+_turso_conn = None
+
+
+class _TursoTransaction:
+    """Bọc kết nối Turso để dùng được `with _connect() as conn:` y như sqlite3.
+
+    sqlite3.Connection vốn là context manager (commit khi xong, rollback khi
+    lỗi); kết nối libsql cũng vậy nhưng ta cần thêm một việc: sync() sau khi
+    commit để kéo thay đổi từ mây về replica cục bộ — không sync thì lệnh
+    ĐỌC ngay sau đó (ví dụ /chitieu sau /chi) chưa thấy dữ liệu vừa ghi.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self._conn.commit()
+            try:
+                self._conn.sync()
+            except Exception as e:
+                # commit đã đẩy dữ liệu lên mây thành công — sync lỗi chỉ nghĩa là
+                # replica cục bộ tạm cũ, lần thao tác sau sẽ sync lại
+                logger.warning("Không sync được replica Turso: %s", e)
+        else:
+            self._conn.rollback()
+        return False
+
+
+def _get_turso_conn():
+    """Mở (1 lần duy nhất) kết nối Turso và kéo dữ liệu mới nhất từ mây về."""
+    global _turso_conn
+    if _turso_conn is None:
+        import libsql  # import tại chỗ: chỉ cần cài libsql khi thật sự dùng Turso
+
+        _turso_conn = libsql.connect(
+            str(REPLICA_PATH), sync_url=TURSO_URL, auth_token=TURSO_TOKEN
+        )
+        _turso_conn.sync()
+        logger.info("Đã kết nối Turso và đồng bộ dữ liệu về replica cục bộ.")
+    return _turso_conn
+
+
+def _connect():
+    """Mở kết nối tới database — mây (Turso) nếu cấu hình, không thì cục bộ.
+
+    Chế độ cục bộ giữ nguyên nết cũ: mỗi thao tác một kết nối riêng —
+    đơn giản và an toàn cho bot nhỏ (SQLite mở kết nối rất nhanh).
+    """
+    if TURSO_URL and TURSO_TOKEN:
+        return _TursoTransaction(_get_turso_conn())
     return sqlite3.connect(DB_PATH)
 
 
@@ -32,7 +108,8 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, de
     Đây là dạng đơn giản nhất của "database migration" — kỹ thuật bắt buộc
     khi ứng dụng đã có người dùng thật.
     """
-    columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+    # .fetchall() thay vì lặp cursor trực tiếp — libsql (Turso) không cho lặp cursor
+    columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 

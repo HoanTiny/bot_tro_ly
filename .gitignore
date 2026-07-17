@@ -7,6 +7,8 @@
 # ── Dữ liệu cá nhân ───────────────────────────────────────────────────────
 # Lịch sử chat, ghi chú, chi tiêu của bạn — dữ liệu riêng tư, không phải code
 bot.db
+# Replica cục bộ khi dùng Turso (kèm các file phụ tự sinh -info, -wal...)
+bot_turso.db*
 
 # ── Thư viện và file tạm — người khác tự tạo lại được ────────────────────
 # venv nặng hàng trăm MB; ai clone repo chỉ cần chạy pip install -r requirements.txt

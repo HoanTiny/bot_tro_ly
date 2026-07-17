@@ -50,6 +50,12 @@ EXTRACT_SYSTEM_PROMPT = (
     'Ví dụ: "ăn sáng 15k, nhận lương 15tr" -> '
     '[{"item": "ăn sáng", "amount": 15000, "category": "ăn uống", "type": "chi"}, '
     '{"item": "nhận lương", "amount": 15000000, "category": "thu nhập", "type": "thu"}]\n'
+    "QUAN TRỌNG — một số tiền chung cho nhiều hoạt động: chỉ tách thành nhiều khoản "
+    'khi MỖI món có số tiền RIÊNG ("ăn trưa 45k, cà phê 30k" -> 2 khoản). '
+    'Nếu nhiều hoạt động đi kèm MỘT số tiền ("đi tàu với thuê xe hết 39k", '
+    '"ăn uống với xem phim tổng cộng 200k") thì đó là TỔNG cho cả cụm -> ghi '
+    'MỘT khoản gộp: [{"item": "đi tàu + thuê xe", "amount": 39000, "category": '
+    '"đi lại", "type": "chi"}] — TUYỆT ĐỐI không ghi số tiền đó lặp lại cho từng món.\n'
     "CHỈ tính khi tiền ĐÃ thực sự ra/vào. Hỏi giá, so sánh, dự định mua, "
     "hay nhắc tới tiền trong câu chuyện chung KHÔNG tính.\n"
     'Nếu người dùng nói rõ thời điểm khác ("hôm qua", "thứ 2 vừa rồi", "hôm 12/7"), '

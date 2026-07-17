@@ -37,6 +37,23 @@ python telegram_ai_bot.py
 
 Thấy dòng log "Bot đang chạy..." là thành công. Mở Telegram, tìm bot của bạn, bấm Start hoặc gõ `/start`, rồi gửi tin nhắn để test.
 
+## Chạy bot trên nhiều máy (database trên mây — Turso)
+
+Mặc định dữ liệu nằm trong file `bot.db` cục bộ — chạy bot ở máy khác là mất dữ liệu cũ. Nếu bạn chạy bot luân phiên nhiều máy, chuyển sang database trên mây:
+
+1. Đăng ký miễn phí tại <https://turso.tech> (đăng nhập bằng GitHub được), tạo một database.
+2. Trong trang database: copy **URL** (dạng `libsql://ten-db-xxx.turso.io`) và tạo một **auth token**.
+3. Điền vào `.env` của **tất cả các máy**:
+
+```
+TURSO_DATABASE_URL=libsql://ten-db-xxx.turso.io
+TURSO_AUTH_TOKEN=eyJ...token_cua_ban
+```
+
+Xong — bot ghi thẳng lên mây, đọc từ replica cục bộ (`bot_turso.db`, tự sinh), khởi động ở máy nào cũng tự kéo dữ liệu mới nhất về. Bỏ trống 2 biến trên thì bot lại chạy cục bộ với `bot.db` như cũ.
+
+Lưu ý: vẫn **không được chạy bot ở 2 máy cùng lúc** — không phải vì database (giờ đã chung), mà vì 2 bot cùng token Telegram sẽ tranh nhau nhận tin (lỗi Conflict).
+
 ## Chạy 24/7 trên Windows (Task Scheduler)
 
 Bot được đăng ký thành task `TelegramAIBot`: tự chạy ngầm khi đăng nhập Windows, crash tự bật lại sau 10 giây (vòng lặp trong `run_bot.bat`), log ghi vào `logs\bot.log`.

@@ -6,6 +6,10 @@ python-dotenv==1.0.1
 # nên phải ghim httpx ở 0.27.x
 httpx==0.27.2
 
+# Turso (SQLite trên mây) — chỉ dùng khi điền TURSO_DATABASE_URL vào .env
+# để chạy bot luân phiên nhiều máy mà không phải copy bot.db qua lại
+libsql==0.1.11
+
 # Xuất báo cáo chi tiêu ra file Excel (.xlsx) cho lệnh /baocao
 openpyxl==3.1.5
 

@@ -25,5 +25,9 @@ def fresh_db(tmp_path, monkeypatch):
     - tmp_path: pytest tự cấp một thư mục tạm riêng cho từng test
     - monkeypatch: thay giá trị biến trong lúc test, hết test tự trả lại
     """
+    # Tắt chế độ Turso trong test (nếu .env của máy có cấu hình) —
+    # test phải chạy trên file cục bộ, không được đụng database trên mây
+    monkeypatch.setattr(db, "TURSO_URL", None)
+    monkeypatch.setattr(db, "TURSO_TOKEN", None)
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test_bot.db")
     db.init_db()
