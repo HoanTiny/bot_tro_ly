@@ -56,6 +56,7 @@ Các lệnh có sẵn trong chat:
 - `/chitieu` — báo cáo tháng này: tổng thu, tổng chi, cân đối, chi theo nhóm, các khoản gần nhất.
 - `/baocao` — xuất file Excel chi tiêu tháng này (2 sheet: chi tiết + tổng hợp theo nhóm); `/baocao 6` xuất tháng 6.
 - Ghi nhầm? `/undo` xóa khoản vừa ghi, hoặc nhắn tự nhiên: "khoản ăn sáng ghi nhầm rồi, 15k thôi" / "xóa khoản cà phê đi" — Claude tự tra id và sửa/xóa qua tool.
+- 📸 **Chụp ảnh hóa đơn gửi vào chat** — Claude Vision đọc ảnh, lấy đúng tổng thanh toán sau giảm giá, tự phân nhóm và ghi sổ. Kèm caption nếu muốn chú thích thêm.
 - `/remind <khi nào + việc gì>` — đặt nhắc bằng ngôn ngữ tự nhiên: `/remind 15 phút nữa họp`, `/remind uống thuốc 8h mỗi sáng` (lặp hằng ngày), `/remind mỗi thứ 2 nộp báo cáo 9h` (lặp hằng tuần). Bot tự nhắn đúng giờ.
 - `/reminders` — xem lời nhắc sắp tới; `/delremind <số>` — hủy.
 - Tối Chủ nhật 20h bot tự gửi tổng kết chi tiêu tuần, kèm nhận xét do Claude viết (so sánh với tuần trước).

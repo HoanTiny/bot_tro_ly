@@ -59,6 +59,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "/chitieu — báo cáo chi tiêu tháng này\n"
         "/baocao — xuất file Excel chi tiêu\n"
         "/undo — xóa khoản vừa ghi nhầm (hoặc nhắn: 'sửa khoản ăn sáng thành 15k')\n"
+        "📸 Chụp ảnh hóa đơn gửi vào đây — mình tự đọc và ghi sổ\n"
         "Gửi file PDF/Word/TXT — mình đọc và trả lời câu hỏi về tài liệu\n"
         "/docs — xem tài liệu đã gửi, /deldoc <số> — xóa\n"
         "/remind <khi nào + việc gì> — đặt nhắc (vd: /remind 8h sáng mai họp)\n"
@@ -379,6 +380,36 @@ async def deldoc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"Đã xóa tài liệu #{doc_id}.")
     else:
         await update.message.reply_text(f"Không tìm thấy tài liệu #{doc_id}. Xem bằng /docs.")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ảnh gửi vào chat = hóa đơn -> Claude Vision đọc, bóc tổng tiền, ghi sổ."""
+    chat_id = update.effective_chat.id
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    # Telegram gửi 1 ảnh dưới nhiều kích cỡ (thumbnail -> to dần);
+    # phần tử cuối là bản to nhất — lấy bản đó cho Claude đọc chữ rõ nhất
+    photo = update.message.photo[-1]
+
+    try:
+        file = await context.bot.get_file(photo.file_id)
+        image_bytes = bytes(await file.download_as_bytearray())
+        expenses = await ai.extract_expenses_from_image(
+            image_bytes, caption=update.message.caption or ""
+        )
+    except Exception:
+        logger.exception("Lỗi khi đọc ảnh hóa đơn")
+        await update.message.reply_text("Mình gặp lỗi khi đọc ảnh. Thử lại sau nhé.")
+        return
+
+    if not expenses:
+        await update.message.reply_text(
+            "Mình không nhận ra hóa đơn trong ảnh (hoặc ảnh mờ quá, không đọc được tổng tiền). "
+            "Chụp thẳng, đủ sáng, rõ dòng tổng tiền nhé."
+        )
+        return
+
+    await update.message.reply_text("🧾 " + record_expenses(chat_id, expenses))
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

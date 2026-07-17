@@ -97,6 +97,8 @@ def main() -> None:
     app.add_handler(CommandHandler("deldoc", handlers.deldoc_command))
     # Nhận file gửi vào chat (PDF/Word/TXT) để đọc vào bộ nhớ tài liệu (RAG)
     app.add_handler(MessageHandler(filters.Document.ALL, handlers.handle_document))
+    # Nhận ảnh (hóa đơn) -> Claude Vision đọc và ghi sổ chi tiêu
+    app.add_handler(MessageHandler(filters.PHOTO, handlers.handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_message))
     app.add_error_handler(handlers.error_handler)
 

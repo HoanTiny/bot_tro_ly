@@ -5,6 +5,7 @@ structured extraction (chi tiêu, lời nhắc) và agent loop với tool use.
 Các module khác chỉ cần gọi: ask_claude(), extract_expenses(), extract_reminder().
 """
 
+import base64
 import json
 import logging
 import re
@@ -385,6 +386,59 @@ def validate_expenses(data: list) -> list[dict]:
                 e = {k: v for k, v in e.items() if k != "date"}
         valid.append(e)
     return valid
+
+
+RECEIPT_INSTRUCTIONS = (
+    "Đây là ảnh hóa đơn/biên lai. Đọc ảnh và trả về MỘT khoản chi duy nhất "
+    "theo đúng định dạng JSON đã nêu:\n"
+    "- item: tên cửa hàng/dịch vụ, kèm món chính nếu thấy rõ (vd 'Highlands - cà phê')\n"
+    "- amount: TỔNG thanh toán cuối cùng (sau giảm giá, đã gồm thuế phí) — "
+    "đừng cộng lại từng dòng, tìm dòng Tổng/Total/Thành tiền\n"
+    "- category: nhóm phù hợp với loại cửa hàng\n"
+    'Nếu hóa đơn in rõ ngày và KHÔNG phải hôm nay, thêm "date": "YYYY-MM-DD".\n'
+    "Ảnh không phải hóa đơn, quá mờ, hoặc không đọc được tổng tiền -> trả []."
+)
+
+
+async def extract_expenses_from_image(image_bytes: bytes, caption: str = "") -> list[dict]:
+    """Đọc ảnh hóa đơn bằng Claude Vision, trả về khoản chi (cùng định dạng
+    với extract_expenses).
+
+    Ảnh gửi cho Claude dưới dạng base64 trong content block type "image" —
+    đây là multimodal: một tin nhắn chứa cả ảnh lẫn chữ.
+    Dùng Sonnet thay vì Haiku: hóa đơn thật thường mờ/nghiêng/lộn xộn, cần
+    model mạnh để đọc chính xác — và ảnh vốn đã tốn ~1.500 token nên phần
+    chênh lệch giá không đáng kể so với rủi ro đọc sai số tiền.
+    """
+    weekdays = ["thứ 2", "thứ 3", "thứ 4", "thứ 5", "thứ 6", "thứ 7", "chủ nhật"]
+    now = datetime.now()
+    system = EXTRACT_SYSTEM_PROMPT + f"\nHôm nay là {now.strftime('%Y-%m-%d')}, {weekdays[now.weekday()]}."
+
+    text_part = RECEIPT_INSTRUCTIONS
+    if caption.strip():
+        text_part += f"\nGhi chú của người dùng kèm ảnh: {caption.strip()}"
+
+    response = await claude_client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=500,
+        system=system,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",  # Telegram nén mọi ảnh thành JPEG
+                        "data": base64.b64encode(image_bytes).decode(),
+                    },
+                },
+                {"type": "text", "text": text_part},
+            ],
+        }],
+    )
+    data = _parse_json(response.content[0].text)
+    return validate_expenses(data)
 
 
 async def extract_reminder(text: str) -> dict | None:
