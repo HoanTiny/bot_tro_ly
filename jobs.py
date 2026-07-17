@@ -9,6 +9,7 @@ from telegram.ext import ContextTypes
 
 import ai
 import db
+import report
 from utils import format_money
 
 logger = logging.getLogger(__name__)
@@ -81,5 +82,17 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         try:
             await context.bot.send_message(chat_id, "\n".join(lines))
+            # Kèm biểu đồ so sánh 2 tuần — bọc chung try: chữ đã gửi được
+            # mà ảnh lỗi thì cũng chỉ mất ảnh, log lại là đủ
+            chart = report.build_week_chart(
+                summary,
+                last_summary,
+                this_label=f"{this_monday.strftime('%d/%m')}–{today.strftime('%d/%m')}",
+                last_label=(
+                    f"{(this_monday - timedelta(days=7)).strftime('%d/%m')}"
+                    f"–{(this_monday - timedelta(days=1)).strftime('%d/%m')}"
+                ),
+            )
+            await context.bot.send_photo(chat_id, chart)
         except Exception:
             logger.exception("Lỗi khi gửi báo cáo tuần cho chat %s", chat_id)

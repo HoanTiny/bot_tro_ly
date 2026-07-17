@@ -27,7 +27,10 @@ Mở file `.env` và điền:
 ```
 TELEGRAM_BOT_TOKEN=token_bot_cua_ban
 ANTHROPIC_API_KEY=api_key_cua_ban
+ALLOWED_CHAT_IDS=chat_id_cua_ban
 ```
+
+`ALLOWED_CHAT_IDS` (nên điền): bot Telegram là công khai — ai tìm ra username cũng nhắn được, và mỗi tin nhắn của người lạ là tiền API của bạn. Điền chat_id của bạn (nhiều người thì phân cách dấu phẩy) để bot từ chối người lạ; ai gõ cửa sẽ được ghi chat_id vào log để bạn thêm nếu muốn. Chưa biết chat_id? Để trống, nhắn cho bot một câu rồi xem log.
 
 ## Chạy bot
 
@@ -67,16 +70,17 @@ Bot được đăng ký thành task `TelegramAIBot`: tự chạy ngầm khi đă
 
 Các lệnh có sẵn trong chat:
 
-- Nhắn tự nhiên `ăn trưa 35k` (không cần lệnh) — bot tự nhận ra khoản chi và ghi vào sổ. Hiểu tiền lóng kiểu Việt: `37k5`, `2 củ`, `5 lít`, `1tr rưỡi`, `nửa củ`... Ghi cả tiền **thu**: `nhận lương 15tr`, `bán đồ cũ 500k`. Nói `hôm qua ăn tối 200k` thì ghi đúng ngày đó. Tin nhắn có nhắc tiền nhưng không phải giao dịch (hỏi giá, dự đoán...) vẫn được chat bình thường.
+- Nhắn tự nhiên `ăn trưa 35k` (không cần lệnh) — bot tự nhận ra khoản chi và ghi vào sổ. Hiểu tiền lóng kiểu Việt: `37k5`, `2 củ`, `5 lít`, `1tr rưỡi`, `nửa củ`... Ghi cả tiền **thu**: `nhận lương 15tr`, `bán đồ cũ 500k`. Nói `hôm qua ăn tối 200k` thì ghi đúng ngày đó. Nhiều hoạt động chung một số tiền (`đi tàu với thuê xe hết 39k`) được ghi MỘT khoản gộp. Tin nhắn có nhắc tiền nhưng không phải giao dịch (hỏi giá, dự đoán...) vẫn được chat bình thường.
 - Hỏi về chi tiêu bằng ngôn ngữ tự nhiên: "tháng này tiêu bao nhiêu tiền ăn?", "khoản chi lớn nhất là gì?" — Claude tự truy vấn database (tool use) rồi trả lời bằng số liệu thật.
 - `/chi <khoản chi>` — ghi chi tiêu tường minh bằng lệnh (ví dụ: `/chi ăn trưa 45k, cà phê 30k`).
-- `/chitieu` — báo cáo tháng này: tổng thu, tổng chi, cân đối, chi theo nhóm, các khoản gần nhất.
+- `/chitieu` — báo cáo tháng này: tổng thu, tổng chi, cân đối, chi theo nhóm, các khoản gần nhất — kèm biểu đồ cột khi có từ 2 nhóm chi.
+- `/hanmuc ăn uống 3tr` — đặt hạn mức chi tháng theo nhóm; khi ghi chi chạm 80% hạn mức bot tự cảnh báo ⚠️, vượt 100% thì 🚨. `/hanmuc` xem tình hình, `/hanmuc xoa ăn uống` bỏ.
 - `/baocao` — xuất file Excel chi tiêu tháng này (2 sheet: chi tiết + tổng hợp theo nhóm); `/baocao 6` xuất tháng 6.
-- Ghi nhầm? `/undo` xóa khoản vừa ghi, hoặc nhắn tự nhiên: "khoản ăn sáng ghi nhầm rồi, 15k thôi" / "xóa khoản cà phê đi" — Claude tự tra id và sửa/xóa qua tool.
+- Ghi nhầm? Bấm nút **↩️ Hoàn tác** ngay dưới tin "Đã ghi" là xóa đúng các khoản vừa ghi. Hoặc `/undo` xóa khoản mới nhất, hoặc nhắn tự nhiên: "khoản ăn sáng ghi nhầm rồi, 15k thôi" / "xóa khoản cà phê đi" — Claude tự tra id và sửa/xóa qua tool.
 - 📸 **Chụp ảnh hóa đơn gửi vào chat** — Claude Vision đọc ảnh, lấy đúng tổng thanh toán sau giảm giá, tự phân nhóm và ghi sổ. Kèm caption nếu muốn chú thích thêm.
 - `/remind <khi nào + việc gì>` — đặt nhắc bằng ngôn ngữ tự nhiên: `/remind 15 phút nữa họp`, `/remind uống thuốc 8h mỗi sáng` (lặp hằng ngày), `/remind mỗi thứ 2 nộp báo cáo 9h` (lặp hằng tuần). Bot tự nhắn đúng giờ.
 - `/reminders` — xem lời nhắc sắp tới; `/delremind <số>` — hủy.
-- Tối Chủ nhật 20h bot tự gửi tổng kết chi tiêu tuần, kèm nhận xét do Claude viết (so sánh với tuần trước).
+- Tối Chủ nhật 20h bot tự gửi tổng kết chi tiêu tuần: số liệu + biểu đồ so sánh với tuần trước + vài dòng nhận xét do Claude viết.
 - **Gửi file PDF/Word/TXT vào chat** — bot đọc, đánh chỉ mục, rồi trả lời mọi câu hỏi về tài liệu kèm tên nguồn (RAG). `/docs` xem danh sách, `/deldoc <số>` xóa.
 - `/note <nội dung>` — lưu một ghi chú (ví dụ: `/note mua sữa`).
 - `/notes` — xem danh sách ghi chú đã lưu.
@@ -87,25 +91,26 @@ Các lệnh có sẵn trong chat:
 
 - `telegram_ai_bot.py` — file chính, chỉ **lắp ráp**: khởi tạo app, đăng ký handler + job, chạy polling.
 - `config.py` — đọc `.env`, các hằng số dùng chung (model, prompt hệ thống, nhóm chi tiêu, múi giờ).
-- `db.py` — tầng lưu trữ SQLite (file `bot.db`): lịch sử chat, ghi chú, chi tiêu, lời nhắc. Muốn xem dữ liệu, cài "DB Browser for SQLite" mở `bot.db`.
+- `db.py` — tầng lưu trữ SQLite (file `bot.db`, hoặc Turso trên mây nếu cấu hình): lịch sử chat, ghi chú, chi tiêu, hạn mức, lời nhắc. Muốn xem dữ liệu, cài "DB Browser for SQLite" mở `bot.db`.
 - `ai.py` — tầng AI, dùng `AsyncAnthropic` (mọi lệnh gọi đều `await`, bot không đơ khi chờ):
-  - `ask_claude()`: agent loop — Claude được cấp tool truy vấn sổ chi tiêu, tự quyết định gọi tool nào rồi trả lời bằng số liệu thật.
+  - `ask_claude()`: agent loop — Claude được cấp tool truy vấn sổ chi tiêu, tự quyết định gọi tool nào rồi trả lời bằng số liệu thật. Có bật prompt caching: phần tools + system prompt lặp lại mỗi tin nhắn chỉ tốn ~10% giá từ lần gọi thứ 2.
   - `extract_expenses()` / `extract_reminder()`: structured extraction — biến câu tự nhiên thành JSON, có hàm `validate_*` kiểm tra lại từng trường trước khi tin.
 - `handlers.py` — các hàm xử lý lệnh Telegram (`/chi`, `/remind`...) và tin nhắn thường; đọc tham số qua `context.args`.
 - `jobs.py` — việc chạy nền bằng JobQueue: kiểm tra lời nhắc mỗi 30 giây, báo cáo tuần tối Chủ nhật.
 - `money_parser.py` — bộ phân tích tiền cục bộ (regex thuần Python, 0 token): tự xử lý các câu ghi thu/chi đơn giản ("ăn phở 37k5", "nhận lương 15tr"); câu mơ hồ (hỏi giá, dự định, ngày phức tạp) mới nhường Claude. Nguyên tắc: thà nhường AI oan còn hơn ghi sai vào sổ.
 - `rag.py` — phần xử lý tài liệu của RAG: đọc chữ từ PDF/Word/TXT (`extract_text`) và chia nhỏ thành đoạn (`chunk_text`). Tìm kiếm dùng SQLite FTS5 với BM25 (trong `db.py`), tìm được cả khi gõ không dấu; Claude truy cập qua tool `search_documents` trong agent loop.
-- `report.py` — xuất báo cáo Excel bằng openpyxl (tạo file trong RAM, gửi thẳng qua Telegram).
+- `report.py` — xuất báo cáo: file Excel bằng openpyxl + biểu đồ PNG bằng matplotlib (đều tạo trong RAM, gửi thẳng qua Telegram).
 - `utils.py` — tiện ích nhỏ (`format_money`, đổi ngày địa phương sang UTC).
-- `tests/` — bộ test tự động (54 test, không gọi API). Chạy: `pytest` (mỗi test được cấp database tạm riêng, không đụng `bot.db` thật).
+- `tests/` — bộ test tự động, không gọi API. Chạy: `pytest` (mỗi test được cấp database tạm riêng, không đụng `bot.db` thật). Riêng `test_extract_live.py` là bộ test HỒI QUY gọi API thật — gom các câu bot từng hiểu sai; chạy bằng `RUN_LIVE_AI=1 pytest tests/test_extract_live.py` mỗi khi sửa prompt bóc tách.
 - Muốn đổi tính cách bot (xưng hô, độ dài trả lời, emoji...): sửa `SYSTEM_PROMPT` trong `config.py` rồi khởi động lại bot.
 
 ## Vài hướng mở rộng để luyện tập thêm
 
-- Thêm lệnh `/img` cho phép gửi ảnh và hỏi Claude về nội dung ảnh (Claude hỗ trợ vision).
+- Ghi chi tiêu bằng **tin nhắn thoại**: Telegram gửi được voice message, nhưng Claude chưa nhận audio — cần thêm một dịch vụ speech-to-text chuyển giọng nói thành chữ trước.
 - Giới hạn số tin nhắn mỗi user được gửi trong 1 giờ để kiểm soát chi phí API.
 - Deploy bot lên một server nhỏ (VPS, Railway, Render...) để bot chạy 24/7 thay vì chỉ chạy trên máy bạn.
+- Nâng model chat trong `config.py` lên đời mới hơn (xem model hiện hành tại https://platform.claude.com/docs) rồi chạy bộ test live để so chất lượng.
 
 ## Lưu ý về chi phí
 
-Mỗi tin nhắn gửi tới Claude API sẽ tốn một khoản phí nhỏ theo số token. Với việc học và test cá nhân, chi phí thường rất thấp, nhưng nên theo dõi usage tại https://console.anthropic.com để tránh bất ngờ.
+Mỗi tin nhắn gửi tới Claude API sẽ tốn một khoản phí nhỏ theo số token. Bot đã có sẵn 2 lớp tiết kiệm: parser cục bộ xử lý câu ghi chi đơn giản (0 token), và prompt caching cho phần lặp lại mỗi tin nhắn (~10% giá). Với việc học và test cá nhân, chi phí thường rất thấp, nhưng nên theo dõi usage tại https://console.anthropic.com để tránh bất ngờ.

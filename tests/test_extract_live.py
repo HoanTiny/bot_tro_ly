@@ -57,3 +57,50 @@ def test_tien_thu_nhan_dung_loai():
     assert len(result) == 1
     assert result[0]["type"] == "thu"
     assert result[0]["amount"] == 15_000_000
+
+
+# ── Đợt huấn luyện 2 (17/07/2026): các tình huống khó hơn ─────────────────
+def test_ghi_lui_ngay_hom_qua():
+    from datetime import datetime, timedelta
+
+    result = extract("hôm qua ăn tối hết 120k")
+    assert len(result) == 1
+    assert result[0]["amount"] == 120_000
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    assert result[0].get("date") == yesterday, f"date sai: {result[0].get('date')}"
+
+
+def test_thu_va_chi_lan_trong_mot_tin():
+    result = extract("nhận lương 15tr, đóng tiền nhà 4tr5")
+    assert len(result) == 2
+    by_type = {e["type"]: e["amount"] for e in result}
+    assert by_type == {"thu": 15_000_000, "chi": 4_500_000}
+
+
+def test_tien_viet_bang_chu():
+    result = extract("gửi xe 5 ngàn với mua chai nước 12 nghìn")
+    assert sorted(e["amount"] for e in result) == [5_000, 12_000]
+
+
+def test_chuyen_tien_cho_nguoi_than_la_chi():
+    result = extract("vừa chuyển cho mẹ 2tr")
+    assert len(result) == 1
+    assert result[0]["type"] == "chi"
+    assert result[0]["amount"] == 2_000_000
+
+
+def test_du_dinh_mua_khong_ghi_so():
+    result = extract("mai chắc phải mua cái quạt mới, tầm 500k")
+    assert result == [], f"dự định mua mà vẫn ghi sổ: {result}"
+
+
+def test_tien_cua_nguoi_khac_khong_ghi_so():
+    result = extract("nghe nói sếp mới mua con xe 2 tỷ, ghê thật")
+    assert result == [], f"tiền của người khác mà vẫn ghi sổ: {result}"
+
+
+def test_mot_so_tien_chung_cach_noi_khac():
+    """Biến thể của vụ 39k — 'tổng cộng' thay vì 'hết'."""
+    result = extract("sáng nay ăn phở với gửi xe tổng cộng 45k")
+    assert len(result) == 1, f"phải là 1 khoản gộp: {result}"
+    assert result[0]["amount"] == 45_000

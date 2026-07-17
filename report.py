@@ -24,7 +24,10 @@ HEADER_FONT = Font(bold=True)
 
 # Màu biểu đồ: MỘT màu duy nhất cho các cột (đây là 1 chuỗi số liệu — tô mỗi
 # nhóm một màu chỉ gây nhiễu), chữ màu xám đậm/nhạt cho phần phụ trợ.
+# Biểu đồ so sánh 2 tuần: tuần này màu xanh (nổi), tuần trước xám (nền) —
+# màu gắn với "tuần nào", không gắn với nhóm chi.
 BAR_COLOR = "#2563eb"
+LAST_WEEK_COLOR = "#c3cbd6"
 TEXT_COLOR = "#111827"
 MUTED_COLOR = "#6b7280"
 
@@ -70,6 +73,73 @@ def build_month_chart(summary: list[tuple[str, int]], year_month: str) -> BytesI
     buffer = BytesIO()
     fig.savefig(buffer, format="png", facecolor="white")
     plt.close(fig)  # giải phóng bộ nhớ — matplotlib giữ figure mãi nếu không đóng
+    buffer.seek(0)
+    return buffer
+
+
+def build_week_chart(
+    this_week: list[tuple[str, int]],
+    last_week: list[tuple[str, int]],
+    this_label: str,
+    last_label: str,
+) -> BytesIO:
+    """Vẽ biểu đồ so sánh chi theo nhóm giữa 2 tuần, trả về PNG trong RAM.
+
+    Mỗi nhóm chi có 1 cặp cột ngang: tuần này (xanh) và tuần trước (xám nhạt) —
+    nhìn phát biết ngay nhóm nào tăng/giảm. Nhóm chỉ có ở 1 trong 2 tuần
+    vẫn hiện (cột kia bằng 0).
+
+    this_week / last_week: [(category, tổng), ...] từ db.get_summary_between.
+    this_label / last_label: chữ hiện trong chú giải, vd "10/07–16/07".
+    """
+    this_map, last_map = dict(this_week), dict(last_week)
+    # Thứ tự nhóm: theo tuần này giảm dần, rồi các nhóm chỉ có ở tuần trước
+    categories = [c for c, _ in this_week] + [c for c, _ in last_week if c not in this_map]
+
+    fig, ax = plt.subplots(figsize=(6.4, 0.8 * len(categories) + 1.4), dpi=150)
+    # barh vẽ từ dưới lên — đảo để nhóm chi nhiều nhất nằm trên cùng.
+    # Mỗi nhóm chiếm 1 đơn vị trục dọc: cột tuần này nằm trên (+0.19),
+    # cột tuần trước nằm dưới (-0.19), mỗi cột dày 0.34.
+    positions = list(range(len(categories)))[::-1]
+    this_vals = [this_map.get(c, 0) for c in categories]
+    last_vals = [last_map.get(c, 0) for c in categories]
+
+    bars_this = ax.barh(
+        [p + 0.19 for p in positions], this_vals, height=0.34,
+        color=BAR_COLOR, label=f"Tuần này ({this_label})",
+    )
+    bars_last = ax.barh(
+        [p - 0.19 for p in positions], last_vals, height=0.34,
+        color=LAST_WEEK_COLOR, label=f"Tuần trước ({last_label})",
+    )
+
+    # Nhãn số tiền ở đầu mỗi cột (cột 0đ thì bỏ nhãn cho đỡ rối)
+    biggest = max(this_vals + last_vals)
+    gap = biggest * 0.015
+    for bars, color in ((bars_this, TEXT_COLOR), (bars_last, MUTED_COLOR)):
+        for bar in bars:
+            if bar.get_width() > 0:
+                ax.text(
+                    bar.get_width() + gap, bar.get_y() + bar.get_height() / 2,
+                    format_money(int(bar.get_width())), va="center",
+                    fontsize=9, color=color,
+                )
+
+    ax.set_yticks(positions)
+    ax.set_yticklabels(categories)
+    ax.set_title("Chi theo nhóm — tuần này so với tuần trước",
+                  fontsize=12, color=TEXT_COLOR, loc="left", pad=12)
+    ax.legend(loc="lower right", frameon=False, fontsize=9)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.xaxis.set_visible(False)
+    ax.tick_params(axis="y", length=0, labelsize=10, labelcolor=TEXT_COLOR)
+    ax.set_xlim(0, biggest * 1.18)
+    fig.tight_layout()
+
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", facecolor="white")
+    plt.close(fig)
     buffer.seek(0)
     return buffer
 
