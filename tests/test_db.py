@@ -130,6 +130,31 @@ def test_nhac_lap_lai_doi_lich():
     assert pending[0][2] == "2099-01-02 08:00" and pending[0][3] == "daily"
 
 
+def test_sua_xoa_khoan_thu_chi():
+    db.add_expense(111, "ăn sáng", 150000, "ăn uống")  # ghi nhầm 150k
+    db.add_expense(999, "của người khác", 50000, "khác")
+
+    # get_last_expense: lấy đúng khoản của mình
+    last = db.get_last_expense(111)
+    assert last[1] == "ăn sáng" and last[2] == 150000
+    expense_id = last[0]
+
+    # update: sửa số tiền; cột lạ trong fields bị lọc bỏ (whitelist)
+    assert db.update_expense(111, expense_id, {"amount": 15000, "hack": "x"}) is True
+    assert db.get_last_expense(111)[2] == 15000
+    assert db.update_expense(111, expense_id, {"hack": "x"}) is False  # không có gì hợp lệ
+
+    # quyền sở hữu: không sửa/xóa được khoản của người khác
+    other_id = db.get_last_expense(999)[0]
+    assert db.update_expense(111, other_id, {"amount": 1}) is False
+    assert db.delete_expense(111, other_id) is False
+
+    # xóa của mình thì được, xóa lần 2 thì thôi
+    assert db.delete_expense(111, expense_id) is True
+    assert db.delete_expense(111, expense_id) is False
+    assert db.get_last_expense(111) is None
+
+
 def test_chi_tieu_ghi_lui_ngay():
     """Khoản chi "hôm qua" phải xuất hiện đúng ngày hôm qua trong mọi truy vấn."""
     from datetime import timedelta

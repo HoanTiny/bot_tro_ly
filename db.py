@@ -486,3 +486,66 @@ def delete_document(chat_id: int, doc_id: int) -> bool:
             return False
         conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
         return True
+
+
+# ── Sửa / xóa khoản thu chi ───────────────────────────────────────────────
+def get_month_expenses_with_id(chat_id: int, year_month: str) -> list[tuple]:
+    """Như get_month_expenses nhưng kèm id — cho tool sửa/xóa của Claude.
+    Trả về [(id, item, amount, category, "dd/mm", kind), ...]."""
+    with _connect() as conn:
+        return conn.execute(
+            """
+            SELECT id, item, amount, category,
+                   strftime('%d/%m', datetime(created_at, 'localtime')), kind
+            FROM expenses
+            WHERE chat_id = ?
+              AND strftime('%Y-%m', datetime(created_at, 'localtime')) = ?
+            ORDER BY id DESC
+            """,
+            (chat_id, year_month),
+        ).fetchall()
+
+
+
+def get_last_expense(chat_id: int) -> tuple[int, str, int, str, str] | None:
+    """Khoản thu/chi mới nhất của một người (cho /undo).
+    Trả về (id, item, amount, category, kind) hoặc None."""
+    with _connect() as conn:
+        return conn.execute(
+            """
+            SELECT id, item, amount, category, kind FROM expenses
+            WHERE chat_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (chat_id,),
+        ).fetchone()
+
+
+def delete_expense(chat_id: int, expense_id: int) -> bool:
+    """Xóa 1 khoản theo id (chỉ của chính mình). True nếu xóa được."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM expenses WHERE id = ? AND chat_id = ?",
+            (expense_id, chat_id),
+        )
+        return cursor.rowcount > 0
+
+
+def update_expense(chat_id: int, expense_id: int, fields: dict) -> bool:
+    """Sửa 1 khoản theo id. fields chỉ nhận các cột trong danh sách cho phép.
+
+    Tên cột KHÔNG THỂ truyền bằng dấu ? (chỉ dùng được cho giá trị), nên
+    phải ghép chuỗi — vì vậy bắt buộc lọc qua danh sách trắng (whitelist)
+    để không ai tuồn được SQL lạ vào tên cột.
+    """
+    allowed = {"item", "amount", "category"}
+    updates = {col: val for col, val in fields.items() if col in allowed}
+    if not updates:
+        return False
+
+    set_clause = ", ".join(f"{col} = ?" for col in updates)
+    with _connect() as conn:
+        cursor = conn.execute(
+            f"UPDATE expenses SET {set_clause} WHERE id = ? AND chat_id = ?",
+            (*updates.values(), expense_id, chat_id),
+        )
+        return cursor.rowcount > 0

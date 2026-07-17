@@ -55,6 +55,7 @@ Các lệnh có sẵn trong chat:
 - `/chi <khoản chi>` — ghi chi tiêu tường minh bằng lệnh (ví dụ: `/chi ăn trưa 45k, cà phê 30k`).
 - `/chitieu` — báo cáo tháng này: tổng thu, tổng chi, cân đối, chi theo nhóm, các khoản gần nhất.
 - `/baocao` — xuất file Excel chi tiêu tháng này (2 sheet: chi tiết + tổng hợp theo nhóm); `/baocao 6` xuất tháng 6.
+- Ghi nhầm? `/undo` xóa khoản vừa ghi, hoặc nhắn tự nhiên: "khoản ăn sáng ghi nhầm rồi, 15k thôi" / "xóa khoản cà phê đi" — Claude tự tra id và sửa/xóa qua tool.
 - `/remind <khi nào + việc gì>` — đặt nhắc bằng ngôn ngữ tự nhiên: `/remind 15 phút nữa họp`, `/remind uống thuốc 8h mỗi sáng` (lặp hằng ngày), `/remind mỗi thứ 2 nộp báo cáo 9h` (lặp hằng tuần). Bot tự nhắn đúng giờ.
 - `/reminders` — xem lời nhắc sắp tới; `/delremind <số>` — hủy.
 - Tối Chủ nhật 20h bot tự gửi tổng kết chi tiêu tuần, kèm nhận xét do Claude viết (so sánh với tuần trước).
@@ -74,10 +75,11 @@ Các lệnh có sẵn trong chat:
   - `extract_expenses()` / `extract_reminder()`: structured extraction — biến câu tự nhiên thành JSON, có hàm `validate_*` kiểm tra lại từng trường trước khi tin.
 - `handlers.py` — các hàm xử lý lệnh Telegram (`/chi`, `/remind`...) và tin nhắn thường; đọc tham số qua `context.args`.
 - `jobs.py` — việc chạy nền bằng JobQueue: kiểm tra lời nhắc mỗi 30 giây, báo cáo tuần tối Chủ nhật.
+- `money_parser.py` — bộ phân tích tiền cục bộ (regex thuần Python, 0 token): tự xử lý các câu ghi thu/chi đơn giản ("ăn phở 37k5", "nhận lương 15tr"); câu mơ hồ (hỏi giá, dự định, ngày phức tạp) mới nhường Claude. Nguyên tắc: thà nhường AI oan còn hơn ghi sai vào sổ.
 - `rag.py` — phần xử lý tài liệu của RAG: đọc chữ từ PDF/Word/TXT (`extract_text`) và chia nhỏ thành đoạn (`chunk_text`). Tìm kiếm dùng SQLite FTS5 với BM25 (trong `db.py`), tìm được cả khi gõ không dấu; Claude truy cập qua tool `search_documents` trong agent loop.
 - `report.py` — xuất báo cáo Excel bằng openpyxl (tạo file trong RAM, gửi thẳng qua Telegram).
 - `utils.py` — tiện ích nhỏ (`format_money`, đổi ngày địa phương sang UTC).
-- `tests/` — bộ test tự động (45 test, không gọi API). Chạy: `pytest` (mỗi test được cấp database tạm riêng, không đụng `bot.db` thật).
+- `tests/` — bộ test tự động (54 test, không gọi API). Chạy: `pytest` (mỗi test được cấp database tạm riêng, không đụng `bot.db` thật).
 - Muốn đổi tính cách bot (xưng hô, độ dài trả lời, emoji...): sửa `SYSTEM_PROMPT` trong `config.py` rồi khởi động lại bot.
 
 ## Vài hướng mở rộng để luyện tập thêm

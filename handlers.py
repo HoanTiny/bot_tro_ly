@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 
 import ai
 import db
+import money_parser
 import rag
 import report
 from utils import format_money, local_date_to_utc_timestamp
@@ -57,6 +58,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "/chi <khoản chi> — ghi chi tiêu (vd: /chi ăn sáng 15k)\n"
         "/chitieu — báo cáo chi tiêu tháng này\n"
         "/baocao — xuất file Excel chi tiêu\n"
+        "/undo — xóa khoản vừa ghi nhầm (hoặc nhắn: 'sửa khoản ăn sáng thành 15k')\n"
         "Gửi file PDF/Word/TXT — mình đọc và trả lời câu hỏi về tài liệu\n"
         "/docs — xem tài liệu đã gửi, /deldoc <số> — xóa\n"
         "/remind <khi nào + việc gì> — đặt nhắc (vd: /remind 8h sáng mai họp)\n"
@@ -128,12 +130,17 @@ async def chi_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.effective_chat.id
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    try:
-        expenses = await ai.extract_expenses(content)
-    except Exception:
-        logger.exception("Lỗi khi bóc tách chi tiêu")
-        await update.message.reply_text("Xin lỗi, mình gặp lỗi khi xử lý. Thử lại sau nhé.")
-        return
+    # Tầng 1: parser cục bộ (0 token). Không tự tin -> tầng 2: Claude
+    expenses = money_parser.parse_expenses(content)
+    if expenses is not None:
+        logger.info("Bóc tách cục bộ (0 token): %s", content)
+    else:
+        try:
+            expenses = await ai.extract_expenses(content)
+        except Exception:
+            logger.exception("Lỗi khi bóc tách chi tiêu")
+            await update.message.reply_text("Xin lỗi, mình gặp lỗi khi xử lý. Thử lại sau nhé.")
+            return
 
     if not expenses:
         await update.message.reply_text(
@@ -177,6 +184,23 @@ async def chitieu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         lines.append(f"• {day} — {item}: {sign}{format_money(amount)}")
 
     await update.message.reply_text("\n".join(lines))
+
+
+async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Xóa khoản thu/chi vừa ghi (gõ nhầm thì rút lại ngay). Gọi nhiều lần
+    để xóa lùi dần từng khoản."""
+    chat_id = update.effective_chat.id
+    last = db.get_last_expense(chat_id)
+    if last is None:
+        await update.message.reply_text("Sổ đang trống, không có gì để xóa.")
+        return
+
+    expense_id, item, amount, category, kind = last
+    db.delete_expense(chat_id, expense_id)
+    sign = "+" if kind == "thu" else "-"
+    await update.message.reply_text(
+        f"↩️ Đã xóa khoản vừa ghi: {item} {sign}{format_money(amount)} ({category})"
+    )
 
 
 async def baocao_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -368,11 +392,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # nhận đây là khoản chi thì ghi luôn, không cần gõ /chi. Nếu không phải
     # (hỏi giá, nói chuyện có nhắc tiền...) thì rơi xuống chat bình thường.
     if ai.MONEY_HINT.search(user_message):
-        try:
-            expenses = await ai.extract_expenses(user_message)
-        except Exception:
-            logger.exception("Lỗi khi bóc tách chi tiêu, chuyển sang chat thường")
-            expenses = []
+        # Tầng 1: parser cục bộ (0 token, tức thì). Trả None = không chắc
+        expenses = money_parser.parse_expenses(user_message)
+        if expenses is not None:
+            logger.info("Bóc tách cục bộ (0 token): %s", user_message)
+        else:
+            # Tầng 2: nhờ Claude (Haiku) phán đoán
+            try:
+                expenses = await ai.extract_expenses(user_message)
+            except Exception:
+                logger.exception("Lỗi khi bóc tách chi tiêu, chuyển sang chat thường")
+                expenses = []
         if expenses:
             await update.message.reply_text(record_expenses(chat_id, expenses))
             return

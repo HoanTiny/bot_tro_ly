@@ -110,8 +110,9 @@ TOOLS = [
     {
         "name": "expense_list",
         "description": (
-            "Danh sách từng khoản chi của người dùng trong một tháng, mới nhất "
-            "trước. Dùng khi người dùng muốn xem chi tiết các khoản đã chi."
+            "Danh sách từng khoản thu/chi của người dùng trong một tháng, mới nhất "
+            "trước, kèm id của từng khoản. Dùng khi người dùng muốn xem chi tiết, "
+            "hoặc TRƯỚC KHI sửa/xóa (để lấy đúng id)."
         ),
         "input_schema": {
             "type": "object",
@@ -122,6 +123,38 @@ TOOLS = [
                 }
             },
             "required": ["year_month"],
+        },
+    },
+    {
+        "name": "update_expense",
+        "description": (
+            "Sửa 1 khoản thu/chi đã ghi (tên, số tiền, hoặc nhóm). CHỈ dùng khi "
+            "người dùng yêu cầu sửa rõ ràng. Phải gọi expense_list trước để lấy "
+            "đúng expense_id — không được đoán id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expense_id": {"type": "integer", "description": "id lấy từ expense_list"},
+                "item": {"type": "string", "description": "Tên mới (bỏ trống nếu không đổi)"},
+                "amount": {"type": "integer", "description": "Số tiền VND mới (bỏ trống nếu không đổi)"},
+                "category": {"type": "string", "description": "Nhóm mới (bỏ trống nếu không đổi)"},
+            },
+            "required": ["expense_id"],
+        },
+    },
+    {
+        "name": "delete_expense",
+        "description": (
+            "Xóa hẳn 1 khoản thu/chi đã ghi. CHỈ dùng khi người dùng yêu cầu xóa "
+            "rõ ràng. Phải gọi expense_list trước để lấy đúng expense_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expense_id": {"type": "integer", "description": "id lấy từ expense_list"},
+            },
+            "required": ["expense_id"],
         },
     },
 ]
@@ -164,12 +197,42 @@ def run_tool(chat_id: int, tool_name: str, tool_input: dict) -> str:
         )
 
     if tool_name == "expense_list":
-        rows = db.get_month_expenses(chat_id, year_month)
+        rows = db.get_month_expenses_with_id(chat_id, year_month)
         return json.dumps(
             [
-                {"item": i, "amount": a, "category": c, "day": d, "kind": k}
-                for i, a, c, d, k in rows
+                {"id": eid, "item": i, "amount": a, "category": c, "day": d, "kind": k}
+                for eid, i, a, c, d, k in rows
             ],
+            ensure_ascii=False,
+        )
+
+    # 2 tool GHI — kiểm tra input chặt hơn tool đọc vì chúng thay đổi dữ liệu.
+    # chat_id vẫn do code truyền -> Claude chỉ sửa/xóa được trong sổ của
+    # đúng người đang chat, dù id có bịa cỡ nào.
+    if tool_name == "update_expense":
+        expense_id = tool_input.get("expense_id")
+        fields = {}
+        if isinstance(tool_input.get("item"), str) and tool_input["item"].strip():
+            fields["item"] = tool_input["item"].strip()
+        if isinstance(tool_input.get("amount"), int) and tool_input["amount"] > 0:
+            fields["amount"] = tool_input["amount"]
+        if tool_input.get("category") in EXPENSE_CATEGORIES + ["thu nhập"]:
+            fields["category"] = tool_input["category"]
+        if not isinstance(expense_id, int) or not fields:
+            return json.dumps({"error": "Thiếu expense_id hoặc không có gì hợp lệ để sửa"}, ensure_ascii=False)
+        ok = db.update_expense(chat_id, expense_id, fields)
+        return json.dumps(
+            {"ok": ok, "updated": fields} if ok else {"error": f"Không tìm thấy khoản id {expense_id}"},
+            ensure_ascii=False,
+        )
+
+    if tool_name == "delete_expense":
+        expense_id = tool_input.get("expense_id")
+        if not isinstance(expense_id, int):
+            return json.dumps({"error": "Thiếu expense_id"}, ensure_ascii=False)
+        ok = db.delete_expense(chat_id, expense_id)
+        return json.dumps(
+            {"ok": ok} if ok else {"error": f"Không tìm thấy khoản id {expense_id}"},
             ensure_ascii=False,
         )
 
@@ -216,7 +279,12 @@ async def ask_claude(chat_id: int, user_message: str) -> str:
     system = (
         SYSTEM_PROMPT
         + f"\nHôm nay là {datetime.now().strftime('%d/%m/%Y')}."
-        + "\nBạn có công cụ tra cứu sổ chi tiêu của người dùng — hãy dùng khi được hỏi về chi tiêu."
+        + "\nBạn có công cụ tra cứu sổ thu chi của người dùng — hãy dùng khi được hỏi về chi tiêu."
+        + "\nBạn cũng có công cụ sửa (update_expense) và xóa (delete_expense) khoản đã ghi — "
+        + "chỉ dùng khi người dùng yêu cầu rõ ràng, luôn gọi expense_list trước để lấy đúng id, "
+        + "và sau khi sửa/xóa phải nói lại chính xác đã thay đổi gì."
+        + "\nNgười dùng không nói tháng nào thì hiểu là THÁNG NÀY, cứ thế làm — đừng hỏi lại. "
+        + "Chỉ hỏi lại khi thật sự mơ hồ (ví dụ: có 2 khoản trùng tên, không rõ xóa khoản nào)."
         + "\nBạn có công cụ tìm kiếm trong tài liệu người dùng đã gửi (search_documents) — "
         + "hãy dùng khi câu hỏi có thể liên quan tài liệu của họ. Khi trả lời từ tài liệu, "
         + "nêu tên tài liệu nguồn. Nếu không tìm thấy, nói thẳng là không thấy — đừng bịa."

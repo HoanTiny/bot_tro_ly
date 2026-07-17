@@ -48,6 +48,7 @@ async def setup_commands(app: Application) -> None:
             BotCommand("chi", "Ghi chi tiêu: /chi ăn sáng 15k"),
             BotCommand("chitieu", "Báo cáo chi tiêu tháng này"),
             BotCommand("baocao", "Xuất Excel chi tiêu: /baocao hoặc /baocao 6"),
+            BotCommand("undo", "Xóa khoản thu/chi vừa ghi nhầm"),
             BotCommand("remind", "Đặt nhắc: /remind 8h sáng mai họp"),
             BotCommand("reminders", "Xem các lời nhắc sắp tới"),
             BotCommand("delremind", "Hủy lời nhắc theo số"),
@@ -88,6 +89,7 @@ def main() -> None:
     app.add_handler(CommandHandler("chi", handlers.chi_command))
     app.add_handler(CommandHandler("chitieu", handlers.chitieu_command))
     app.add_handler(CommandHandler("baocao", handlers.baocao_command))
+    app.add_handler(CommandHandler("undo", handlers.undo_command))
     app.add_handler(CommandHandler("remind", handlers.remind_command))
     app.add_handler(CommandHandler("reminders", handlers.reminders_command))
     app.add_handler(CommandHandler("delremind", handlers.delremind_command))
