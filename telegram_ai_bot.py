@@ -47,9 +47,12 @@ async def setup_commands(app: Application) -> None:
             BotCommand("start", "Giới thiệu bot và các lệnh"),
             BotCommand("chi", "Ghi chi tiêu: /chi ăn sáng 15k"),
             BotCommand("chitieu", "Báo cáo chi tiêu tháng này"),
+            BotCommand("baocao", "Xuất Excel chi tiêu: /baocao hoặc /baocao 6"),
             BotCommand("remind", "Đặt nhắc: /remind 8h sáng mai họp"),
             BotCommand("reminders", "Xem các lời nhắc sắp tới"),
             BotCommand("delremind", "Hủy lời nhắc theo số"),
+            BotCommand("docs", "Xem tài liệu đã gửi cho bot"),
+            BotCommand("deldoc", "Xóa tài liệu theo số"),
             BotCommand("note", "Lưu ghi chú: /note mua sữa"),
             BotCommand("notes", "Xem các ghi chú đã lưu"),
             BotCommand("delnote", "Xóa ghi chú theo số: /delnote 1"),
@@ -84,9 +87,14 @@ def main() -> None:
     app.add_handler(CommandHandler("delnote", handlers.delnote_command))
     app.add_handler(CommandHandler("chi", handlers.chi_command))
     app.add_handler(CommandHandler("chitieu", handlers.chitieu_command))
+    app.add_handler(CommandHandler("baocao", handlers.baocao_command))
     app.add_handler(CommandHandler("remind", handlers.remind_command))
     app.add_handler(CommandHandler("reminders", handlers.reminders_command))
     app.add_handler(CommandHandler("delremind", handlers.delremind_command))
+    app.add_handler(CommandHandler("docs", handlers.docs_command))
+    app.add_handler(CommandHandler("deldoc", handlers.deldoc_command))
+    # Nhận file gửi vào chat (PDF/Word/TXT) để đọc vào bộ nhớ tài liệu (RAG)
+    app.add_handler(MessageHandler(filters.Document.ALL, handlers.handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_message))
     app.add_error_handler(handlers.error_handler)
 

@@ -44,6 +44,9 @@ EXTRACT_SYSTEM_PROMPT = (
     '{"item": "đổ xăng", "amount": 50000, "category": "đi lại"}]\n'
     "CHỈ tính khi người dùng thông báo ĐÃ chi tiền. Hỏi giá, so sánh, dự định mua, "
     "hay nhắc tới tiền trong câu chuyện chung KHÔNG phải khoản chi.\n"
+    'Nếu người dùng nói rõ chi vào lúc khác ("hôm qua", "thứ 2 vừa rồi", "hôm 12/7"), '
+    'thêm trường "date": "YYYY-MM-DD" vào khoản chi đó. Không nhắc gì đến thời điểm '
+    "thì BỎ trường date (mặc định là hôm nay).\n"
     "Nếu tin nhắn không chứa khoản chi nào rõ ràng, trả về []."
 )
 
@@ -59,7 +62,25 @@ MONEY_HINT = re.compile(
 # Mỗi tool khai báo tên, mô tả (Claude đọc mô tả để quyết định KHI NÀO dùng)
 # và input_schema (định dạng tham số, chuẩn JSON Schema). Claude không chạy
 # được code — nó chỉ YÊU CẦU gọi tool, code của ta chạy rồi trả kết quả lại.
-EXPENSE_TOOLS = [
+TOOLS = [
+    {
+        "name": "search_documents",
+        "description": (
+            "Tìm kiếm trong các tài liệu (PDF, Word...) mà người dùng đã gửi cho bot. "
+            "Dùng khi câu hỏi liên quan tới nội dung tài liệu của họ: quy định, hợp đồng, "
+            "báo cáo, tài liệu kỹ thuật... Trả về các đoạn văn bản liên quan nhất kèm tên tài liệu."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Từ khóa tìm kiếm, nên là các từ quan trọng trong câu hỏi",
+                }
+            },
+            "required": ["query"],
+        },
+    },
     {
         "name": "expense_summary",
         "description": (
@@ -98,13 +119,25 @@ EXPENSE_TOOLS = [
 ]
 
 
-def run_expense_tool(chat_id: int, tool_name: str, tool_input: dict) -> str:
+def run_tool(chat_id: int, tool_name: str, tool_input: dict) -> str:
     """Thực thi tool mà Claude yêu cầu, trả kết quả dạng chuỗi JSON.
 
     Chú ý bảo mật: chat_id lấy từ Telegram (người đang chat), KHÔNG cho
     Claude tự truyền vào — nếu không, prompt khéo léo có thể đọc trộm
-    dữ liệu chi tiêu của người khác.
+    dữ liệu chi tiêu/tài liệu của người khác.
     """
+    if tool_name == "search_documents":
+        results = db.search_chunks(chat_id, tool_input.get("query", ""))
+        if not results:
+            return json.dumps(
+                {"info": "Không tìm thấy đoạn nào phù hợp trong tài liệu của người dùng"},
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            [{"document": name, "content": content} for content, name in results],
+            ensure_ascii=False,
+        )
+
     year_month = tool_input.get("year_month", datetime.now().strftime("%Y-%m"))
 
     if tool_name == "expense_summary":
@@ -165,6 +198,9 @@ async def ask_claude(chat_id: int, user_message: str) -> str:
         SYSTEM_PROMPT
         + f"\nHôm nay là {datetime.now().strftime('%d/%m/%Y')}."
         + "\nBạn có công cụ tra cứu sổ chi tiêu của người dùng — hãy dùng khi được hỏi về chi tiêu."
+        + "\nBạn có công cụ tìm kiếm trong tài liệu người dùng đã gửi (search_documents) — "
+        + "hãy dùng khi câu hỏi có thể liên quan tài liệu của họ. Khi trả lời từ tài liệu, "
+        + "nêu tên tài liệu nguồn. Nếu không tìm thấy, nói thẳng là không thấy — đừng bịa."
         + "\nSố tiền là VND, viết kiểu 15.000đ."
     )
 
@@ -175,7 +211,7 @@ async def ask_claude(chat_id: int, user_message: str) -> str:
             max_tokens=1024,
             system=system,
             messages=messages,
-            tools=EXPENSE_TOOLS,
+            tools=TOOLS,
         )
 
         # stop_reason cho biết Claude dừng vì lý do gì:
@@ -188,7 +224,7 @@ async def ask_claude(chat_id: int, user_message: str) -> str:
         for block in response.content:
             if block.type == "tool_use":
                 logger.info("Claude gọi tool %s với input %s", block.name, block.input)
-                result = run_expense_tool(chat_id, block.name, block.input)
+                result = run_tool(chat_id, block.name, block.input)
                 tool_results.append(
                     {"type": "tool_result", "tool_use_id": block.id, "content": result}
                 )
@@ -216,10 +252,16 @@ async def extract_expenses(text: str) -> list[dict]:
     các phần tử hợp lệ. LLM có thể trả về sai định dạng, nên LUÔN kiểm tra
     lại từng trường trước khi tin (nguyên tắc: không tin đầu ra của AI mù quáng).
     """
+    # Ghép ngày hôm nay vào prompt lúc gọi (không để trong hằng số — hằng số
+    # chỉ được tạo 1 lần khi khởi động, bot chạy sang ngày mới sẽ sai)
+    weekdays = ["thứ 2", "thứ 3", "thứ 4", "thứ 5", "thứ 6", "thứ 7", "chủ nhật"]
+    now = datetime.now()
+    system = EXTRACT_SYSTEM_PROMPT + f"\nHôm nay là {now.strftime('%Y-%m-%d')}, {weekdays[now.weekday()]}."
+
     response = await claude_client.messages.create(
         model=EXTRACT_MODEL,  # việc bóc tách đơn giản -> dùng Haiku cho rẻ và nhanh
         max_tokens=500,
-        system=EXTRACT_SYSTEM_PROMPT,
+        system=system,
         messages=[{"role": "user", "content": text}],
     )
     data = _parse_json(response.content[0].text)  # ném ValueError nếu không có JSON -> handler bắt
@@ -233,13 +275,23 @@ def validate_expenses(data: list) -> list[dict]:
     """
     valid = []
     for e in data:
-        if (
+        if not (
             isinstance(e, dict)
             and isinstance(e.get("item"), str) and e["item"].strip()
             and isinstance(e.get("amount"), int) and e["amount"] > 0
             and e.get("category") in EXPENSE_CATEGORIES
         ):
-            valid.append(e)
+            continue
+        # Trường date (tùy chọn): phải đúng định dạng và không ở tương lai —
+        # sai thì chỉ bỏ trường date (coi như chi hôm nay), vẫn giữ khoản chi
+        if "date" in e:
+            try:
+                parsed = datetime.strptime(e["date"], "%Y-%m-%d").date()
+                if parsed > datetime.now().date():
+                    raise ValueError
+            except (ValueError, TypeError):
+                e = {k: v for k, v in e.items() if k != "date"}
+        valid.append(e)
     return valid
 
 

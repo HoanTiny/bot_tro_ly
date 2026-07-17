@@ -44,6 +44,20 @@ def test_giu_cai_dung_loai_cai_sai_trong_cung_danh_sach():
     assert validate_expenses(data) == [data[0]]
 
 
+def test_truong_date_hop_le_duoc_giu():
+    data = [{"item": "ăn tối", "amount": 200000, "category": "ăn uống", "date": "2020-01-15"}]
+    assert validate_expenses(data)[0]["date"] == "2020-01-15"
+
+
+def test_truong_date_sai_bi_bo_nhung_khoan_chi_van_giu():
+    # date ở tương lai hoặc sai định dạng -> bỏ date (coi như hôm nay), giữ khoản chi
+    for bad_date in ["2099-01-01", "hôm qua", 123]:
+        data = [{"item": "x", "amount": 1000, "category": "khác", "date": bad_date}]
+        result = validate_expenses(data)
+        assert len(result) == 1
+        assert "date" not in result[0], bad_date
+
+
 # ── Validate lời nhắc ─────────────────────────────────────────────────────
 def test_loi_nhac_hop_le():
     data = {"content": "họp", "remind_at": "2099-01-01 08:00"}

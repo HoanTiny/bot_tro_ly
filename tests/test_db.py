@@ -100,6 +100,25 @@ def test_tong_chi_theo_khoang_ngay():
     assert db.get_summary_between(111, "2020-01-01", "2020-01-07") == []
 
 
+def test_chi_tieu_ghi_lui_ngay():
+    """Khoản chi "hôm qua" phải xuất hiện đúng ngày hôm qua trong mọi truy vấn."""
+    from datetime import timedelta
+
+    from utils import local_date_to_utc_timestamp
+
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    db.add_expense(111, "ăn tối", 200000, "ăn uống", created_at=local_date_to_utc_timestamp(yesterday))
+
+    # Lọc theo khoảng ngày: hôm qua có, hôm nay không
+    assert dict(db.get_summary_between(111, yesterday, yesterday)) == {"ăn uống": 200000}
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert db.get_summary_between(111, today, today) == []
+
+    # Cột ngày hiển thị phải là hôm qua (trừ khi hôm qua thuộc tháng trước)
+    rows = db.get_month_expenses(111, yesterday[:7])
+    assert rows[0][3] == f"{yesterday[8:10]}/{yesterday[5:7]}"
+
+
 # ── Lời nhắc ──────────────────────────────────────────────────────────────
 def test_loi_nhac_den_gio_va_danh_dau_da_gui():
     qua_khu = db.add_reminder(111, "họp với khách", "2020-01-01 08:00")

@@ -39,13 +39,15 @@ Thấy dòng log "Bot đang chạy..." là thành công. Mở Telegram, tìm bot
 
 Các lệnh có sẵn trong chat:
 
-- Nhắn tự nhiên `ăn trưa 35k` (không cần lệnh) — bot tự nhận ra khoản chi và ghi vào sổ. Tin nhắn có nhắc tiền nhưng không phải chi tiêu (hỏi giá, so sánh...) vẫn được chat bình thường.
+- Nhắn tự nhiên `ăn trưa 35k` (không cần lệnh) — bot tự nhận ra khoản chi và ghi vào sổ. Nói `hôm qua ăn tối 200k` hay `thứ 2 vừa rồi đổ xăng 60k` thì ghi đúng ngày đó. Tin nhắn có nhắc tiền nhưng không phải chi tiêu (hỏi giá, so sánh...) vẫn được chat bình thường.
 - Hỏi về chi tiêu bằng ngôn ngữ tự nhiên: "tháng này tiêu bao nhiêu tiền ăn?", "khoản chi lớn nhất là gì?" — Claude tự truy vấn database (tool use) rồi trả lời bằng số liệu thật.
 - `/chi <khoản chi>` — ghi chi tiêu tường minh bằng lệnh (ví dụ: `/chi ăn trưa 45k, cà phê 30k`).
 - `/chitieu` — báo cáo chi tiêu tháng này: tổng tiền, chia theo nhóm, các khoản gần nhất.
+- `/baocao` — xuất file Excel chi tiêu tháng này (2 sheet: chi tiết + tổng hợp theo nhóm); `/baocao 6` xuất tháng 6.
 - `/remind <khi nào + việc gì>` — đặt nhắc bằng ngôn ngữ tự nhiên: `/remind 15 phút nữa họp`, `/remind 8h sáng mai nộp báo cáo`. Bot tự nhắn đúng giờ.
 - `/reminders` — xem lời nhắc sắp tới; `/delremind <số>` — hủy.
 - Tối Chủ nhật 20h bot tự gửi tổng kết chi tiêu tuần, kèm nhận xét do Claude viết (so sánh với tuần trước).
+- **Gửi file PDF/Word/TXT vào chat** — bot đọc, đánh chỉ mục, rồi trả lời mọi câu hỏi về tài liệu kèm tên nguồn (RAG). `/docs` xem danh sách, `/deldoc <số>` xóa.
 - `/note <nội dung>` — lưu một ghi chú (ví dụ: `/note mua sữa`).
 - `/notes` — xem danh sách ghi chú đã lưu.
 - `/delnote <số>` — xóa ghi chú theo số hiển thị trong `/notes`.
@@ -61,8 +63,10 @@ Các lệnh có sẵn trong chat:
   - `extract_expenses()` / `extract_reminder()`: structured extraction — biến câu tự nhiên thành JSON, có hàm `validate_*` kiểm tra lại từng trường trước khi tin.
 - `handlers.py` — các hàm xử lý lệnh Telegram (`/chi`, `/remind`...) và tin nhắn thường; đọc tham số qua `context.args`.
 - `jobs.py` — việc chạy nền bằng JobQueue: kiểm tra lời nhắc mỗi 30 giây, báo cáo tuần tối Chủ nhật.
-- `utils.py` — tiện ích nhỏ (`format_money`).
-- `tests/` — bộ test tự động (19 test, không gọi API). Chạy: `pytest` (mỗi test được cấp database tạm riêng, không đụng `bot.db` thật).
+- `rag.py` — phần xử lý tài liệu của RAG: đọc chữ từ PDF/Word/TXT (`extract_text`) và chia nhỏ thành đoạn (`chunk_text`). Tìm kiếm dùng SQLite FTS5 với BM25 (trong `db.py`), tìm được cả khi gõ không dấu; Claude truy cập qua tool `search_documents` trong agent loop.
+- `report.py` — xuất báo cáo Excel bằng openpyxl (tạo file trong RAM, gửi thẳng qua Telegram).
+- `utils.py` — tiện ích nhỏ (`format_money`, đổi ngày địa phương sang UTC).
+- `tests/` — bộ test tự động (41 test, không gọi API). Chạy: `pytest` (mỗi test được cấp database tạm riêng, không đụng `bot.db` thật).
 
 ## Vài hướng mở rộng để luyện tập thêm
 

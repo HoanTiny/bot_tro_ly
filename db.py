@@ -89,6 +89,33 @@ def init_db() -> None:
             )
             """
         )
+        # Tài liệu người dùng gửi (RAG): bảng documents lưu tên file,
+        # bảng chunks lưu từng đoạn văn bản đã chia nhỏ.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        # chunks là bảng FTS5 — công cụ full-text search CÓ SẴN trong SQLite:
+        # tự đánh chỉ mục từng từ để tìm kiếm cực nhanh, xếp hạng kết quả
+        # bằng thuật toán BM25. remove_diacritics 2: gõ "nghi phep" vẫn tìm
+        # thấy "nghỉ phép" — rất hợp tiếng Việt.
+        # UNINDEXED = cột đi kèm để lọc/join, không cần đánh chỉ mục tìm kiếm.
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
+                content,
+                chat_id UNINDEXED,
+                doc_id UNINDEXED,
+                tokenize = 'unicode61 remove_diacritics 2'
+            )
+            """
+        )
 
 
 def add_message(chat_id: int, role: str, content: str) -> None:
@@ -183,13 +210,25 @@ def delete_note(chat_id: int, note_id: int) -> bool:
 
 
 # ── Chi tiêu (/chi, /chitieu) ─────────────────────────────────────────────
-def add_expense(chat_id: int, item: str, amount: int, category: str) -> int:
-    """Lưu 1 khoản chi, trả về id vừa tạo."""
+def add_expense(
+    chat_id: int, item: str, amount: int, category: str, created_at: str | None = None
+) -> int:
+    """Lưu 1 khoản chi, trả về id vừa tạo.
+
+    created_at: thời điểm UTC "YYYY-MM-DD HH:MM:SS" — chỉ truyền khi ghi lùi
+    ngày ("hôm qua ăn tối 200k"). Bỏ trống thì SQLite tự điền thời điểm bây giờ.
+    """
     with _connect() as conn:
-        cursor = conn.execute(
-            "INSERT INTO expenses (chat_id, item, amount, category) VALUES (?, ?, ?, ?)",
-            (chat_id, item, amount, category),
-        )
+        if created_at is None:
+            cursor = conn.execute(
+                "INSERT INTO expenses (chat_id, item, amount, category) VALUES (?, ?, ?, ?)",
+                (chat_id, item, amount, category),
+            )
+        else:
+            cursor = conn.execute(
+                "INSERT INTO expenses (chat_id, item, amount, category, created_at) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, item, amount, category, created_at),
+            )
         return cursor.lastrowid
 
 
@@ -320,3 +359,76 @@ def delete_reminder(chat_id: int, reminder_id: int) -> bool:
             (reminder_id, chat_id),
         )
         return cursor.rowcount > 0
+
+
+# ── Tài liệu (RAG) ────────────────────────────────────────────────────────
+def add_document(chat_id: int, name: str, chunks: list[str]) -> int:
+    """Lưu 1 tài liệu cùng các đoạn văn bản đã chia nhỏ. Trả về id tài liệu.
+
+    executemany: chèn hàng loạt trong 1 lệnh — nhanh hơn hẳn vòng lặp execute
+    từng dòng khi tài liệu có hàng trăm đoạn.
+    """
+    with _connect() as conn:
+        cursor = conn.execute(
+            "INSERT INTO documents (chat_id, name) VALUES (?, ?)",
+            (chat_id, name),
+        )
+        doc_id = cursor.lastrowid
+        conn.executemany(
+            "INSERT INTO chunks (content, chat_id, doc_id) VALUES (?, ?, ?)",
+            [(chunk, str(chat_id), doc_id) for chunk in chunks],
+        )
+        return doc_id
+
+
+def search_chunks(chat_id: int, query: str, limit: int = 5) -> list[tuple[str, str]]:
+    """Tìm các đoạn liên quan nhất tới câu hỏi. Trả về [(nội dung, tên tài liệu)].
+
+    - Câu hỏi được rút thành các từ, nối bằng OR: chỉ cần khớp 1 từ là ứng viên
+    - ORDER BY rank: FTS5 tự xếp hạng bằng BM25 — đoạn chứa nhiều từ khóa
+      hiếm sẽ đứng đầu (nguyên lý của mọi search engine)
+    """
+    import re as _re
+
+    words = _re.findall(r"\w+", query)
+    if not words:
+        return []
+    match_query = " OR ".join(words)
+
+    with _connect() as conn:
+        return conn.execute(
+            """
+            SELECT chunks.content, documents.name
+            FROM chunks JOIN documents ON documents.id = chunks.doc_id
+            WHERE chunks MATCH ? AND chunks.chat_id = ?
+            ORDER BY rank LIMIT ?
+            """,
+            (match_query, str(chat_id), limit),
+        ).fetchall()
+
+
+def list_documents(chat_id: int) -> list[tuple[int, str, int, str]]:
+    """Danh sách tài liệu của một người: [(id, tên, số đoạn, ngày tải), ...]."""
+    with _connect() as conn:
+        return conn.execute(
+            """
+            SELECT d.id, d.name,
+                   (SELECT COUNT(*) FROM chunks WHERE chunks.doc_id = d.id),
+                   datetime(d.created_at, 'localtime')
+            FROM documents d WHERE d.chat_id = ? ORDER BY d.id
+            """,
+            (chat_id,),
+        ).fetchall()
+
+
+def delete_document(chat_id: int, doc_id: int) -> bool:
+    """Xóa tài liệu + toàn bộ đoạn của nó (chỉ của chính mình). True nếu xóa được."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM documents WHERE id = ? AND chat_id = ?",
+            (doc_id, chat_id),
+        )
+        if cursor.rowcount == 0:
+            return False
+        conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+        return True

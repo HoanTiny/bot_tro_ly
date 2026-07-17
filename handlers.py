@@ -12,7 +12,11 @@ from telegram.ext import ContextTypes
 
 import ai
 import db
-from utils import format_money
+import rag
+import report
+from utils import format_money, local_date_to_utc_timestamp
+
+MAX_DOCUMENT_MB = 15  # chặn file quá to (Bot API cũng chỉ cho bot tải tối đa 20MB)
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +28,14 @@ def record_expenses(chat_id: int, expenses: list[dict]) -> str:
     """
     lines = []
     for e in expenses:
-        db.add_expense(chat_id, e["item"], e["amount"], e["category"])
-        lines.append(f"• {e['item']}: {format_money(e['amount'])} ({e['category']})")
+        # Có trường date (người dùng nói "hôm qua"...) -> ghi lùi về ngày đó
+        backdate = e.get("date")
+        db.add_expense(
+            chat_id, e["item"], e["amount"], e["category"],
+            created_at=local_date_to_utc_timestamp(backdate) if backdate else None,
+        )
+        day_note = f" — hôm {backdate[8:10]}/{backdate[5:7]}" if backdate else ""
+        lines.append(f"• {e['item']}: {format_money(e['amount'])} ({e['category']}){day_note}")
 
     month_total = sum(
         amount for _, amount in db.get_month_summary(chat_id, datetime.now().strftime("%Y-%m"))
@@ -43,6 +53,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "Các lệnh:\n"
         "/chi <khoản chi> — ghi chi tiêu (vd: /chi ăn sáng 15k)\n"
         "/chitieu — báo cáo chi tiêu tháng này\n"
+        "/baocao — xuất file Excel chi tiêu\n"
+        "Gửi file PDF/Word/TXT — mình đọc và trả lời câu hỏi về tài liệu\n"
+        "/docs — xem tài liệu đã gửi, /deldoc <số> — xóa\n"
         "/remind <khi nào + việc gì> — đặt nhắc (vd: /remind 8h sáng mai họp)\n"
         "/reminders — xem lời nhắc sắp tới\n"
         "/delremind <số> — hủy lời nhắc\n"
@@ -153,6 +166,33 @@ async def chitieu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text("\n".join(lines))
 
 
+async def baocao_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Xuất Excel chi tiêu: /baocao (tháng này) hoặc /baocao 6 (tháng 6 năm nay)."""
+    chat_id = update.effective_chat.id
+    now = datetime.now()
+
+    if context.args:
+        if len(context.args) != 1 or not context.args[0].isdigit() or not 1 <= int(context.args[0]) <= 12:
+            await update.message.reply_text("Cách dùng: /baocao (tháng này) hoặc /baocao <1-12>")
+            return
+        year_month = f"{now.year}-{int(context.args[0]):02d}"
+    else:
+        year_month = now.strftime("%Y-%m")
+
+    rows = db.get_month_expenses(chat_id, year_month)
+    if not rows:
+        await update.message.reply_text(f"Tháng {year_month[5:7]}/{year_month[:4]} chưa có khoản chi nào.")
+        return
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+    buffer = report.build_month_report(rows, db.get_month_summary(chat_id, year_month), year_month)
+    await update.message.reply_document(
+        document=buffer,
+        filename=f"chi-tieu-{year_month}.xlsx",
+        caption=f"📄 Báo cáo chi tiêu tháng {year_month[5:7]}/{year_month[:4]} ({len(rows)} khoản)",
+    )
+
+
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Đặt lời nhắc bằng ngôn ngữ tự nhiên: /remind 8h sáng mai uống thuốc."""
     content = " ".join(context.args).strip()
@@ -219,6 +259,81 @@ async def delremind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"Đã hủy lời nhắc #{reminder_id}.")
     else:
         await update.message.reply_text(f"Không tìm thấy lời nhắc #{reminder_id}.")
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Người dùng gửi file vào chat -> đọc, chia đoạn, đánh chỉ mục (RAG bước 1).
+
+    Sau bước này, cứ hỏi bình thường — Claude sẽ tự tìm trong tài liệu.
+    """
+    chat_id = update.effective_chat.id
+    doc = update.message.document
+
+    if not doc.file_name.lower().endswith(rag.SUPPORTED_EXTENSIONS):
+        await update.message.reply_text(
+            f"Mình chỉ đọc được các định dạng: {', '.join(rag.SUPPORTED_EXTENSIONS)}"
+        )
+        return
+    if doc.file_size and doc.file_size > MAX_DOCUMENT_MB * 1024 * 1024:
+        await update.message.reply_text(f"File to quá (giới hạn {MAX_DOCUMENT_MB}MB).")
+        return
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    try:
+        # Tải file từ server Telegram về RAM rồi bóc chữ
+        file = await context.bot.get_file(doc.file_id)
+        data = bytes(await file.download_as_bytearray())
+        text = rag.extract_text(doc.file_name, data)
+    except Exception:
+        logger.exception("Lỗi khi đọc tài liệu %s", doc.file_name)
+        await update.message.reply_text("Mình không đọc được file này. Thử file khác nhé.")
+        return
+
+    chunks = rag.chunk_text(text)
+    if not chunks:
+        await update.message.reply_text(
+            "File không có chữ nào đọc được (PDF scan ảnh thì mình chưa đọc được)."
+        )
+        return
+
+    db.add_document(chat_id, doc.file_name, chunks)
+    await update.message.reply_text(
+        f"📚 Đã đọc xong '{doc.file_name}': {len(text):,} ký tự, chia thành {len(chunks)} đoạn.\n"
+        f"Giờ cứ hỏi mình bất cứ điều gì về tài liệu này!\n"
+        f"Xem danh sách tài liệu: /docs"
+    )
+
+
+async def docs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Liệt kê tài liệu đã tải lên."""
+    docs = db.list_documents(update.effective_chat.id)
+    if not docs:
+        await update.message.reply_text(
+            "Chưa có tài liệu nào. Gửi file PDF/Word/TXT vào đây để mình đọc nhé."
+        )
+        return
+
+    lines = [
+        f"#{doc_id} — {name} ({n_chunks} đoạn, tải {created_at[8:10]}/{created_at[5:7]})"
+        for doc_id, name, n_chunks, created_at in docs
+    ]
+    await update.message.reply_text(
+        "Tài liệu của bạn:\n" + "\n".join(lines) + "\n\nXóa bằng: /deldoc <số>"
+    )
+
+
+async def deldoc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Xóa tài liệu theo số: /deldoc 2."""
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("Cách dùng: /deldoc <số tài liệu> (xem số bằng /docs)")
+        return
+
+    doc_id = int(context.args[0])
+    if db.delete_document(update.effective_chat.id, doc_id):
+        await update.message.reply_text(f"Đã xóa tài liệu #{doc_id}.")
+    else:
+        await update.message.reply_text(f"Không tìm thấy tài liệu #{doc_id}. Xem bằng /docs.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
