@@ -51,15 +51,18 @@ Các lệnh có sẵn trong chat:
 - `/delnote <số>` — xóa ghi chú theo số hiển thị trong `/notes`.
 - `/reset` — xóa lịch sử chat, bắt đầu cuộc trò chuyện mới.
 
-## Cấu trúc code (để hiểu, không chỉ chạy)
+## Cấu trúc dự án (mỗi file một trách nhiệm)
 
-- `telegram_ai_bot.py` — file chính:
-  - `ask_claude()`: agent loop — gửi tin nhắn + lịch sử tới Claude kèm danh sách tool (`EXPENSE_TOOLS`); nếu Claude yêu cầu tool thì chạy `run_expense_tool()` rồi gửi kết quả lại, lặp đến khi Claude trả lời xong.
-  - `extract_expenses()`: dùng Claude làm structured extraction — biến câu tự nhiên ("ăn sáng 15k") thành JSON có cấu trúc (món, số tiền, nhóm) rồi kiểm tra lại từng trường trước khi lưu.
-  - `start_command`, `reset_command`, `note_command`, `notes_command`, `delnote_command`, `handle_message`: các "handler" — hàm được gọi khi user gõ lệnh tương ứng hoặc gửi tin nhắn thường. Các handler lệnh đọc tham số qua `context.args`.
-  - `check_reminders_job()`, `weekly_report_job()`: các job chạy nền bằng JobQueue — kiểm tra lời nhắc đến giờ mỗi 30 giây, và gửi báo cáo tuần 20h tối Chủ nhật. Lời nhắc lưu trong SQLite nên restart bot không mất.
-  - `main()`: khởi tạo database + bot Telegram (kèm múi giờ Asia/Ho_Chi_Minh cho JobQueue) và bắt đầu polling (liên tục hỏi Telegram server xem có tin nhắn mới không).
-- `db.py` — lớp lưu trữ SQLite: lịch sử chat lưu trong file `bot.db` (tự tạo khi chạy lần đầu), nên restart bot không mất lịch sử. Muốn xem dữ liệu bên trong, cài "DB Browser for SQLite" rồi mở file `bot.db`.
+- `telegram_ai_bot.py` — file chính, chỉ **lắp ráp**: khởi tạo app, đăng ký handler + job, chạy polling.
+- `config.py` — đọc `.env`, các hằng số dùng chung (model, prompt hệ thống, nhóm chi tiêu, múi giờ).
+- `db.py` — tầng lưu trữ SQLite (file `bot.db`): lịch sử chat, ghi chú, chi tiêu, lời nhắc. Muốn xem dữ liệu, cài "DB Browser for SQLite" mở `bot.db`.
+- `ai.py` — tầng AI, dùng `AsyncAnthropic` (mọi lệnh gọi đều `await`, bot không đơ khi chờ):
+  - `ask_claude()`: agent loop — Claude được cấp tool truy vấn sổ chi tiêu, tự quyết định gọi tool nào rồi trả lời bằng số liệu thật.
+  - `extract_expenses()` / `extract_reminder()`: structured extraction — biến câu tự nhiên thành JSON, có hàm `validate_*` kiểm tra lại từng trường trước khi tin.
+- `handlers.py` — các hàm xử lý lệnh Telegram (`/chi`, `/remind`...) và tin nhắn thường; đọc tham số qua `context.args`.
+- `jobs.py` — việc chạy nền bằng JobQueue: kiểm tra lời nhắc mỗi 30 giây, báo cáo tuần tối Chủ nhật.
+- `utils.py` — tiện ích nhỏ (`format_money`).
+- `tests/` — bộ test tự động (19 test, không gọi API). Chạy: `pytest` (mỗi test được cấp database tạm riêng, không đụng `bot.db` thật).
 
 ## Vài hướng mở rộng để luyện tập thêm
 

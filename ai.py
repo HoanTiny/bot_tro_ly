@@ -1,0 +1,309 @@
+"""
+Tầng AI: mọi thứ liên quan tới Claude nằm ở đây — client, prompt,
+structured extraction (chi tiêu, lời nhắc) và agent loop với tool use.
+
+Các module khác chỉ cần gọi: ask_claude(), extract_expenses(), extract_reminder().
+"""
+
+import json
+import logging
+import re
+from datetime import datetime
+
+from anthropic import AsyncAnthropic
+
+import db
+from config import (
+    ANTHROPIC_API_KEY,
+    CLAUDE_MODEL,
+    EXPENSE_CATEGORIES,
+    EXTRACT_MODEL,
+    MAX_HISTORY_MESSAGES,
+    SYSTEM_PROMPT,
+)
+
+logger = logging.getLogger(__name__)
+
+# AsyncAnthropic thay vì Anthropic: phiên bản bất đồng bộ — trong lúc chờ
+# Claude trả lời (3-10 giây), bot vẫn rảnh để xử lý tin nhắn khác và chạy
+# job nhắc việc. Bản sync sẽ "đơ" toàn bộ bot trong suốt thời gian chờ.
+claude_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+# Prompt cho việc bóc tách chi tiêu (structured extraction). Khác với chat:
+# ta KHÔNG cần Claude trò chuyện, chỉ cần nó trả về đúng định dạng JSON
+# để code parse được. Chú ý các kỹ thuật: nói rõ "DUY NHẤT JSON", cho ví dụ
+# cụ thể, liệt kê giá trị được phép, và quy định trường hợp thất bại ([]).
+EXTRACT_SYSTEM_PROMPT = (
+    "Bạn là công cụ bóc tách chi tiêu từ tin nhắn tiếng Việt.\n"
+    "Trả về DUY NHẤT một mảng JSON, không giải thích, không markdown.\n"
+    'Mỗi khoản chi là một phần tử: {"item": "tên khoản chi", "amount": <số tiền VND, số nguyên>, "category": "<nhóm>"}\n'
+    f"category chỉ được chọn một trong: {', '.join(EXPENSE_CATEGORIES)}.\n"
+    "Hiểu cách viết tiền kiểu Việt Nam: 15k = 15000, 2tr = 2000000, 1tr2 = 1200000.\n"
+    'Ví dụ: "ăn sáng 15k, đổ xăng 50k" -> '
+    '[{"item": "ăn sáng", "amount": 15000, "category": "ăn uống"}, '
+    '{"item": "đổ xăng", "amount": 50000, "category": "đi lại"}]\n'
+    "CHỈ tính khi người dùng thông báo ĐÃ chi tiền. Hỏi giá, so sánh, dự định mua, "
+    "hay nhắc tới tiền trong câu chuyện chung KHÔNG phải khoản chi.\n"
+    "Nếu tin nhắn không chứa khoản chi nào rõ ràng, trả về []."
+)
+
+# Bộ lọc rẻ trước khi gọi AI đắt: tin nhắn phải có "mùi tiền" (15k, 2tr,
+# 50.000đ, 200 nghìn...) thì mới đáng gọi Claude bóc tách. Nhờ vậy tin nhắn
+# chat thường không tốn thêm lệnh gọi API nào.
+MONEY_HINT = re.compile(
+    r"\d[\d.,]*\s*(k|tr|triệu|nghìn|ngàn|đồng|đ|d|vnd)\b",
+    re.IGNORECASE,
+)
+
+# ── Tool use: các "công cụ" Claude được phép gọi khi chat ─────────────────
+# Mỗi tool khai báo tên, mô tả (Claude đọc mô tả để quyết định KHI NÀO dùng)
+# và input_schema (định dạng tham số, chuẩn JSON Schema). Claude không chạy
+# được code — nó chỉ YÊU CẦU gọi tool, code của ta chạy rồi trả kết quả lại.
+EXPENSE_TOOLS = [
+    {
+        "name": "expense_summary",
+        "description": (
+            "Tổng chi tiêu của người dùng trong một tháng, chia theo nhóm "
+            "(ăn uống, đi lại, mua sắm...). Dùng khi người dùng hỏi đã tiêu "
+            "bao nhiêu tiền, tổng chi tiêu, hoặc chi cho nhóm nào bao nhiêu."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year_month": {
+                    "type": "string",
+                    "description": "Tháng cần xem, định dạng YYYY-MM, ví dụ 2026-07",
+                }
+            },
+            "required": ["year_month"],
+        },
+    },
+    {
+        "name": "expense_list",
+        "description": (
+            "Danh sách từng khoản chi của người dùng trong một tháng, mới nhất "
+            "trước. Dùng khi người dùng muốn xem chi tiết các khoản đã chi."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year_month": {
+                    "type": "string",
+                    "description": "Tháng cần xem, định dạng YYYY-MM, ví dụ 2026-07",
+                }
+            },
+            "required": ["year_month"],
+        },
+    },
+]
+
+
+def run_expense_tool(chat_id: int, tool_name: str, tool_input: dict) -> str:
+    """Thực thi tool mà Claude yêu cầu, trả kết quả dạng chuỗi JSON.
+
+    Chú ý bảo mật: chat_id lấy từ Telegram (người đang chat), KHÔNG cho
+    Claude tự truyền vào — nếu không, prompt khéo léo có thể đọc trộm
+    dữ liệu chi tiêu của người khác.
+    """
+    year_month = tool_input.get("year_month", datetime.now().strftime("%Y-%m"))
+
+    if tool_name == "expense_summary":
+        summary = db.get_month_summary(chat_id, year_month)
+        return json.dumps(
+            {"month": year_month, "total": sum(a for _, a in summary), "by_category": dict(summary)},
+            ensure_ascii=False,
+        )
+
+    if tool_name == "expense_list":
+        rows = db.get_month_expenses(chat_id, year_month)
+        return json.dumps(
+            [{"item": i, "amount": a, "category": c, "day": d} for i, a, c, d in rows],
+            ensure_ascii=False,
+        )
+
+    return json.dumps({"error": f"Không có tool tên {tool_name}"}, ensure_ascii=False)
+
+
+def _strip_code_fence(raw: str) -> str:
+    """Phòng khi Claude bọc JSON trong ```json ... ``` dù đã dặn không."""
+    if raw.startswith("```"):
+        raw = raw.strip("`").removeprefix("json").strip()
+    return raw
+
+
+def _parse_json(raw: str):
+    """Parse JSON "khoan dung": chịu được code fence và chữ thừa quanh JSON.
+
+    Model nhỏ (Haiku) thỉnh thoảng kèm câu giải thích trước/sau khối JSON dù
+    đã dặn "DUY NHẤT JSON". Thay vì json.loads (chết ngay khi có chữ thừa),
+    ta tìm vị trí { hoặc [ đầu tiên rồi dùng raw_decode — parse xong khối JSON
+    là dừng, mặc kệ phần đuôi. Ném ValueError nếu không có JSON nào.
+    """
+    raw = _strip_code_fence(raw.strip())
+    starts = [i for i in (raw.find("{"), raw.find("[")) if i != -1]
+    if not starts:
+        raise ValueError(f"Không tìm thấy JSON trong: {raw[:100]!r}")
+    data, _ = json.JSONDecoder().raw_decode(raw[min(starts):])
+    return data
+
+
+# ── Các hàm gọi Claude ────────────────────────────────────────────────────
+async def ask_claude(chat_id: int, user_message: str) -> str:
+    """Gửi tin nhắn của user tới Claude, kèm lịch sử chat, và trả về câu trả lời.
+
+    Đây là một "agent loop" — vòng lặp: gọi Claude -> Claude muốn dùng tool
+    -> ta chạy tool, gửi kết quả lại -> Claude trả lời tiếp (hoặc dùng tool
+    khác). Lặp đến khi Claude trả lời bằng chữ. Đây chính là cơ chế lõi của
+    mọi AI agent hiện nay.
+    """
+    db.add_message(chat_id, "user", user_message)
+    messages = db.get_history(chat_id, MAX_HISTORY_MESSAGES)
+
+    # Claude không tự biết hôm nay là ngày nào — phải nói trong system prompt
+    # để "tháng này", "tháng trước" quy đổi ra đúng tháng.
+    system = (
+        SYSTEM_PROMPT
+        + f"\nHôm nay là {datetime.now().strftime('%d/%m/%Y')}."
+        + "\nBạn có công cụ tra cứu sổ chi tiêu của người dùng — hãy dùng khi được hỏi về chi tiêu."
+        + "\nSố tiền là VND, viết kiểu 15.000đ."
+    )
+
+    # Giới hạn số vòng để phòng Claude gọi tool mãi không dừng
+    for _ in range(5):
+        response = await claude_client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1024,
+            system=system,
+            messages=messages,
+            tools=EXPENSE_TOOLS,
+        )
+
+        # stop_reason cho biết Claude dừng vì lý do gì:
+        # "tool_use" = muốn gọi tool, "end_turn" = đã trả lời xong
+        if response.stop_reason != "tool_use":
+            break
+
+        # Chạy tất cả tool Claude yêu cầu trong lượt này
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                logger.info("Claude gọi tool %s với input %s", block.name, block.input)
+                result = run_expense_tool(chat_id, block.name, block.input)
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": block.id, "content": result}
+                )
+
+        # Nối tiếp hội thoại: lượt của Claude (có yêu cầu tool) + kết quả tool
+        # (đóng vai user theo quy ước của API), rồi vòng lặp gọi Claude tiếp
+        messages = messages + [
+            {"role": "assistant", "content": response.content},
+            {"role": "user", "content": tool_results},
+        ]
+
+    # Ghép các khối text trong câu trả lời cuối (bỏ qua khối tool_use nếu có)
+    reply_text = "".join(block.text for block in response.content if block.type == "text").strip()
+    if not reply_text:
+        reply_text = "Xin lỗi, mình chưa trả lời được câu này. Thử hỏi lại cách khác nhé."
+
+    db.add_message(chat_id, "assistant", reply_text)
+    return reply_text
+
+
+async def extract_expenses(text: str) -> list[dict]:
+    """Nhờ Claude bóc tách tin nhắn thành danh sách khoản chi (structured extraction).
+
+    Trả về [{"item": ..., "amount": ..., "category": ...}, ...] — chỉ gồm
+    các phần tử hợp lệ. LLM có thể trả về sai định dạng, nên LUÔN kiểm tra
+    lại từng trường trước khi tin (nguyên tắc: không tin đầu ra của AI mù quáng).
+    """
+    response = await claude_client.messages.create(
+        model=EXTRACT_MODEL,  # việc bóc tách đơn giản -> dùng Haiku cho rẻ và nhanh
+        max_tokens=500,
+        system=EXTRACT_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": text}],
+    )
+    data = _parse_json(response.content[0].text)  # ném ValueError nếu không có JSON -> handler bắt
+    return validate_expenses(data)
+
+
+def validate_expenses(data: list) -> list[dict]:
+    """Lọc lại đầu ra của Claude: chỉ giữ các khoản chi đúng định dạng.
+
+    Tách thành hàm riêng (không gọi API) để viết test được mà không tốn tiền.
+    """
+    valid = []
+    for e in data:
+        if (
+            isinstance(e, dict)
+            and isinstance(e.get("item"), str) and e["item"].strip()
+            and isinstance(e.get("amount"), int) and e["amount"] > 0
+            and e.get("category") in EXPENSE_CATEGORIES
+        ):
+            valid.append(e)
+    return valid
+
+
+async def extract_reminder(text: str) -> dict | None:
+    """Nhờ Claude bóc tách lời nhắc: nội dung + thời điểm cụ thể.
+
+    Điểm mấu chốt: LLM không biết "bây giờ" là lúc nào, nên phải đưa thời
+    gian hiện tại (kèm thứ trong tuần) vào prompt thì "15 phút nữa",
+    "8h sáng mai", "thứ 6 tuần này" mới quy đổi ra được thời điểm tuyệt đối.
+    Trả về {"content": ..., "remind_at": "YYYY-MM-DD HH:MM"} hoặc None.
+    """
+    weekdays = ["thứ 2", "thứ 3", "thứ 4", "thứ 5", "thứ 6", "thứ 7", "chủ nhật"]
+    now = datetime.now()
+    system = (
+        "Bạn là công cụ bóc tách lời nhắc từ tin nhắn tiếng Việt.\n"
+        f"Bây giờ là {now.strftime('%Y-%m-%d %H:%M')}, {weekdays[now.weekday()]}.\n"
+        'Trả về DUY NHẤT một JSON: {"content": "<việc cần nhắc>", "remind_at": "YYYY-MM-DD HH:MM"}\n'
+        "Quy đổi thời gian tương đối ra thời điểm tuyệt đối: '15 phút nữa', '8h sáng mai', "
+        "'tối nay', 'thứ 6 tuần này'... Nếu nói giờ mà không nói ngày, chọn thời điểm "
+        "GẦN NHẤT trong tương lai. 'sáng' = 08:00, 'trưa' = 12:00, 'chiều' = 15:00, 'tối' = 20:00 "
+        "nếu không nói giờ cụ thể.\n"
+        "Nếu tin nhắn KHÔNG nhắc gì đến thời gian (không có giờ, không có sáng/trưa/chiều/tối, "
+        'không có hôm nay/mai/thứ mấy...), TUYỆT ĐỐI không tự bịa — trả về {"error": "không rõ thời gian"}.\n'
+        'Nếu không xác định được thời gian hoặc nội dung, trả về {"error": "lý do"}.'
+    )
+    response = await claude_client.messages.create(
+        model=EXTRACT_MODEL,  # bóc tách thời gian cũng là việc đơn giản -> Haiku
+        max_tokens=200,
+        system=system,
+        messages=[{"role": "user", "content": text}],
+    )
+    data = _parse_json(response.content[0].text)
+    return validate_reminder(data)
+
+
+def validate_reminder(data: dict) -> dict | None:
+    """Kiểm tra đầu ra bóc tách lời nhắc. Tách riêng để test không cần gọi API."""
+    if "error" in data or not data.get("content") or not data.get("remind_at"):
+        return None
+    # Kiểm tra định dạng thời gian bằng cách parse thử — sai định dạng sẽ ném
+    # ValueError, coi như không bóc tách được
+    try:
+        datetime.strptime(data["remind_at"], "%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return None
+    return {"content": str(data["content"]), "remind_at": data["remind_at"]}
+
+
+async def write_weekly_comment(this_week: dict, last_week: dict) -> str:
+    """Nhờ Claude viết 2-3 câu nhận xét cho báo cáo chi tiêu tuần."""
+    response = await claude_client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=300,
+        system=(
+            "Bạn là trợ lý tài chính thân thiện. Dựa trên số liệu chi tiêu, viết 2-3 câu "
+            "nhận xét ngắn bằng tiếng Việt: so sánh với tuần trước, nhóm nào tăng/giảm "
+            "đáng chú ý, một lời khuyên nhẹ nhàng nếu phù hợp. Không lặp lại bảng số liệu."
+        ),
+        messages=[{
+            "role": "user",
+            "content": json.dumps(
+                {"tuần_này": this_week, "tuần_trước": last_week},
+                ensure_ascii=False,
+            ),
+        }],
+    )
+    return response.content[0].text.strip()
