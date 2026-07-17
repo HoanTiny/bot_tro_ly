@@ -7,7 +7,7 @@ tin nhắn thường. Handler chỉ làm 3 việc: đọc input -> gọi ai.py /
 import logging
 from datetime import datetime
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 import ai
@@ -15,6 +15,7 @@ import db
 import money_parser
 import rag
 import report
+from config import EXPENSE_CATEGORIES
 from utils import format_money, local_date_to_utc_timestamp
 
 MAX_DOCUMENT_MB = 15  # chặn file quá to (Bot API cũng chỉ cho bot tải tối đa 20MB)
@@ -22,31 +23,80 @@ MAX_DOCUMENT_MB = 15  # chặn file quá to (Bot API cũng chỉ cho bot tải t
 logger = logging.getLogger(__name__)
 
 
-def record_expenses(chat_id: int, expenses: list[dict]) -> str:
-    """Lưu các khoản chi vào database và trả về tin nhắn xác nhận.
+def record_expenses(chat_id: int, expenses: list[dict]) -> tuple[str, InlineKeyboardMarkup]:
+    """Lưu các khoản chi vào database, trả về (tin xác nhận, nút Hoàn tác).
 
-    Dùng chung cho /chi và tin nhắn tự nhiên — logic một nơi, sửa một chỗ.
+    Dùng chung cho /chi, tin nhắn tự nhiên và ảnh hóa đơn — logic một nơi.
+    Nút Hoàn tác mang theo id các khoản vừa ghi (trong callback_data) để
+    bấm một phát là xóa đúng các khoản đó — AI bóc tách kiểu gì cũng có
+    lúc sai, quan trọng là sửa lại phải thật dễ.
     """
     lines = []
+    ids = []
     for e in expenses:
         # Có trường date (người dùng nói "hôm qua"...) -> ghi lùi về ngày đó
         backdate = e.get("date")
         kind = e.get("type", "chi")
-        db.add_expense(
+        expense_id = db.add_expense(
             chat_id, e["item"], e["amount"], e["category"],
             created_at=local_date_to_utc_timestamp(backdate) if backdate else None,
             kind=kind,
         )
+        ids.append(expense_id)
         day_note = f" — hôm {backdate[8:10]}/{backdate[5:7]}" if backdate else ""
         sign = "🟢 +" if kind == "thu" else "🔴 -"
         lines.append(f"{sign}{format_money(e['amount'])} {e['item']} ({e['category']}){day_note}")
 
     year_month = datetime.now().strftime("%Y-%m")
-    month_chi = sum(amount for _, amount in db.get_month_summary(chat_id, year_month))
+    summary = dict(db.get_month_summary(chat_id, year_month))
+    month_chi = sum(summary.values())
     month_thu = db.get_month_income(chat_id, year_month)
-    return (
+    text = (
         "Đã ghi:\n" + "\n".join(lines)
         + f"\n\nTháng này: thu {format_money(month_thu)} — chi {format_money(month_chi)} — xem /chitieu"
+    )
+
+    # Cảnh báo hạn mức: chỉ nhắc các nhóm vừa phát sinh chi, chạm 80% trở lên
+    budgets = db.get_budgets(chat_id)
+    if budgets:
+        touched = {e["category"] for e in expenses if e.get("type", "chi") == "chi"}
+        for category in sorted(touched):
+            limit = budgets.get(category)
+            if not limit:
+                continue
+            spent = summary.get(category, 0)
+            pct = spent * 100 // limit
+            if pct >= 100:
+                text += f"\n🚨 {category}: {format_money(spent)}/{format_money(limit)} — VƯỢT hạn mức tháng ({pct}%)!"
+            elif pct >= 80:
+                text += f"\n⚠️ {category}: {format_money(spent)}/{format_money(limit)} — sắp chạm hạn mức tháng ({pct}%)"
+    # callback_data tối đa 64 byte theo luật Telegram — vài id số thì dư sức
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("↩️ Hoàn tác", callback_data="undo:" + ",".join(map(str, ids)))
+    ]])
+    return text, markup
+
+
+async def undo_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Xử lý bấm nút Hoàn tác dưới tin "Đã ghi" — xóa đúng các khoản trong nút.
+
+    update.callback_query: Telegram gửi loại update riêng khi bấm nút inline.
+    PHẢI gọi query.answer() dù không hiện gì — không gọi thì client Telegram
+    quay vòng chờ mãi trên nút.
+    """
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    ids = [int(x) for x in query.data.removeprefix("undo:").split(",") if x.isdigit()]
+    deleted = sum(1 for expense_id in ids if db.delete_expense(chat_id, expense_id))
+
+    await query.answer()
+    if deleted == 0:
+        # Bấm lần 2, hoặc khoản đã bị xóa bằng /undo trước đó
+        await query.edit_message_text(query.message.text + "\n\n↩️ (đã hoàn tác trước đó rồi)")
+        return
+    await query.edit_message_text(
+        query.message.text + f"\n\n↩️ Đã hoàn tác — xóa {deleted} khoản vừa ghi."
     )
 
 
@@ -58,6 +108,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "/chi <khoản chi> — ghi chi tiêu (vd: /chi ăn sáng 15k)\n"
         "/chitieu — báo cáo chi tiêu tháng này\n"
         "/baocao — xuất file Excel chi tiêu\n"
+        "/hanmuc ăn uống 3tr — đặt hạn mức tháng, mình nhắc khi sắp vượt\n"
         "/undo — xóa khoản vừa ghi nhầm (hoặc nhắn: 'sửa khoản ăn sáng thành 15k')\n"
         "📸 Chụp ảnh hóa đơn gửi vào đây — mình tự đọc và ghi sổ\n"
         "Gửi file PDF/Word/TXT — mình đọc và trả lời câu hỏi về tài liệu\n"
@@ -149,7 +200,8 @@ async def chi_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    await update.message.reply_text(record_expenses(chat_id, expenses))
+    text, undo_markup = record_expenses(chat_id, expenses)
+    await update.message.reply_text(text, reply_markup=undo_markup)
 
 
 async def chitieu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -185,6 +237,85 @@ async def chitieu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         lines.append(f"• {day} — {item}: {sign}{format_money(amount)}")
 
     await update.message.reply_text("\n".join(lines))
+
+    # Kèm biểu đồ cột khi có từ 2 nhóm chi trở lên (1 nhóm thì cột đơn
+    # không nói thêm được gì so với con số ở trên)
+    if len(summary) >= 2:
+        await update.message.reply_photo(report.build_month_chart(summary, year_month))
+
+
+def _match_category(text: str) -> str | None:
+    """Đối chiếu chữ người dùng gõ với danh sách nhóm chi — chấp nhận
+    không dấu ("an uong" -> "ăn uống") nhờ hàm bỏ dấu của money_parser."""
+    normalized = money_parser._no_accent(text.strip().lower())
+    for category in EXPENSE_CATEGORIES:
+        if money_parser._no_accent(category) == normalized:
+            return category
+    return None
+
+
+async def hanmuc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hạn mức chi tháng theo nhóm:
+    /hanmuc                — xem các hạn mức + đã tiêu bao nhiêu
+    /hanmuc ăn uống 3tr    — đặt (hoặc đổi) hạn mức
+    /hanmuc xoa ăn uống    — bỏ hạn mức
+    """
+    chat_id = update.effective_chat.id
+    content = " ".join(context.args).strip().lower()
+    usage = (
+        "Cách dùng:\n"
+        "/hanmuc ăn uống 3tr — đặt hạn mức tháng\n"
+        "/hanmuc — xem tình hình các hạn mức\n"
+        "/hanmuc xoa ăn uống — bỏ hạn mức\n"
+        f"Các nhóm: {', '.join(EXPENSE_CATEGORIES)}"
+    )
+
+    # /hanmuc — xem tình hình
+    if not content:
+        budgets = db.get_budgets(chat_id)
+        if not budgets:
+            await update.message.reply_text("Chưa đặt hạn mức nào.\n\n" + usage)
+            return
+        summary = dict(db.get_month_summary(chat_id, datetime.now().strftime("%Y-%m")))
+        lines = [f"Hạn mức tháng {datetime.now().strftime('%m/%Y')}:"]
+        for category, limit in sorted(budgets.items()):
+            spent = summary.get(category, 0)
+            pct = spent * 100 // limit
+            icon = "🚨" if pct >= 100 else "⚠️" if pct >= 80 else "✅"
+            lines.append(f"{icon} {category}: {format_money(spent)}/{format_money(limit)} ({pct}%)")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    # /hanmuc xoa <nhóm>
+    if content.startswith(("xoa ", "xóa ")):
+        category = _match_category(content.split(" ", 1)[1])
+        if category and db.delete_budget(chat_id, category):
+            await update.message.reply_text(f"Đã bỏ hạn mức nhóm {category}.")
+        else:
+            await update.message.reply_text("Không tìm thấy hạn mức đó. Xem bằng /hanmuc.")
+        return
+
+    # /hanmuc <nhóm> <số tiền> — tiền nằm đâu trong câu cũng bắt được
+    match = money_parser.MONEY_RE.search(content)
+    if not match:
+        await update.message.reply_text("Mình không thấy số tiền.\n\n" + usage)
+        return
+    amount = money_parser._parse_amount(match)
+    if amount <= 0:
+        await update.message.reply_text("Hạn mức phải lớn hơn 0 chứ nhỉ 😄")
+        return
+    category = _match_category(content[: match.start()] + content[match.end():])
+    if category is None:
+        await update.message.reply_text("Mình không nhận ra nhóm chi.\n\n" + usage)
+        return
+
+    db.set_budget(chat_id, category, amount)
+    spent = dict(db.get_month_summary(chat_id, datetime.now().strftime("%Y-%m"))).get(category, 0)
+    await update.message.reply_text(
+        f"Đã đặt hạn mức {category}: {format_money(amount)}/tháng.\n"
+        f"Tháng này đã chi {format_money(spent)} ({spent * 100 // amount}%). "
+        f"Mình sẽ nhắc khi chạm 80%."
+    )
 
 
 async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -409,7 +540,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    await update.message.reply_text("🧾 " + record_expenses(chat_id, expenses))
+    text, undo_markup = record_expenses(chat_id, expenses)
+    await update.message.reply_text("🧾 " + text, reply_markup=undo_markup)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -435,7 +567,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.exception("Lỗi khi bóc tách chi tiêu, chuyển sang chat thường")
                 expenses = []
         if expenses:
-            await update.message.reply_text(record_expenses(chat_id, expenses))
+            text, undo_markup = record_expenses(chat_id, expenses)
+            await update.message.reply_text(text, reply_markup=undo_markup)
             return
 
     try:

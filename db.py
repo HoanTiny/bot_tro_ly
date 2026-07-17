@@ -207,6 +207,18 @@ def init_db() -> None:
             )
             """
         )
+        # Hạn mức chi tiêu theo nhóm (/hanmuc). PRIMARY KEY ghép (chat_id,
+        # category): mỗi người mỗi nhóm chỉ có 1 hạn mức — đặt lại là ghi đè.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS budgets (
+                chat_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, category)
+            )
+            """
+        )
         # Migration cho database đã có dữ liệu:
         # - expenses.kind: 'chi' (tiền ra) hoặc 'thu' (tiền vào)
         # - reminders.repeat: 'once' / 'daily' / 'weekly'
@@ -421,6 +433,43 @@ def get_month_summary(chat_id: int, year_month: str) -> list[tuple[str, int]]:
             """,
             (chat_id, year_month),
         ).fetchall()
+
+
+# ── Hạn mức chi tiêu (/hanmuc) ────────────────────────────────────────────
+def set_budget(chat_id: int, category: str, amount: int) -> None:
+    """Đặt (hoặc ghi đè) hạn mức tháng cho một nhóm chi.
+
+    ON CONFLICT ... DO UPDATE = "upsert": chưa có thì INSERT, có rồi thì
+    UPDATE — một câu SQL thay cho cặp SELECT-rồi-INSERT/UPDATE dễ sai.
+    """
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO budgets (chat_id, category, amount) VALUES (?, ?, ?)
+            ON CONFLICT(chat_id, category) DO UPDATE SET amount = excluded.amount
+            """,
+            (chat_id, category, amount),
+        )
+
+
+def get_budgets(chat_id: int) -> dict[str, int]:
+    """Toàn bộ hạn mức của một người: {"ăn uống": 3000000, ...}."""
+    with _connect() as conn:
+        return dict(
+            conn.execute(
+                "SELECT category, amount FROM budgets WHERE chat_id = ?", (chat_id,)
+            ).fetchall()
+        )
+
+
+def delete_budget(chat_id: int, category: str) -> bool:
+    """Bỏ hạn mức một nhóm. True nếu có để xóa."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM budgets WHERE chat_id = ? AND category = ?",
+            (chat_id, category),
+        )
+        return cursor.rowcount > 0
 
 
 # ── Lời nhắc (/remind) ────────────────────────────────────────────────────

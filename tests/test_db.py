@@ -195,3 +195,28 @@ def test_huy_loi_nhac():
     assert db.delete_reminder(111, rid) is True
     assert db.get_pending_reminders(111) == []
     assert db.delete_reminder(111, rid) is False  # đã xóa rồi
+
+
+# ── Hạn mức (/hanmuc) ─────────────────────────────────────────────────────
+def test_dat_va_doc_han_muc():
+    db.set_budget(111, "ăn uống", 3_000_000)
+    db.set_budget(111, "đi lại", 500_000)
+    assert db.get_budgets(111) == {"ăn uống": 3_000_000, "đi lại": 500_000}
+
+
+def test_dat_lai_han_muc_la_ghi_de():
+    db.set_budget(111, "ăn uống", 3_000_000)
+    db.set_budget(111, "ăn uống", 5_000_000)
+    assert db.get_budgets(111) == {"ăn uống": 5_000_000}
+
+
+def test_han_muc_tach_theo_nguoi():
+    db.set_budget(111, "ăn uống", 3_000_000)
+    assert db.get_budgets(222) == {}
+
+
+def test_xoa_han_muc():
+    db.set_budget(111, "ăn uống", 3_000_000)
+    assert db.delete_budget(111, "ăn uống") is True
+    assert db.delete_budget(111, "ăn uống") is False  # xóa lần 2: không còn gì
+    assert db.get_budgets(111) == {}

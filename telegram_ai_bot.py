@@ -20,13 +20,23 @@ import logging
 from datetime import time
 
 import pytz
-from telegram import BotCommand
-from telegram.ext import Application, CommandHandler, Defaults, MessageHandler, filters
+from telegram import BotCommand, Update
+from telegram.ext import (
+    Application,
+    ApplicationHandlerStop,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    Defaults,
+    MessageHandler,
+    TypeHandler,
+    filters,
+)
 
 import db
 import handlers
 import jobs
-from config import TELEGRAM_BOT_TOKEN, TIMEZONE
+from config import ALLOWED_CHAT_IDS, TELEGRAM_BOT_TOKEN, TIMEZONE
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -48,6 +58,7 @@ async def setup_commands(app: Application) -> None:
             BotCommand("chi", "Ghi chi tiêu: /chi ăn sáng 15k"),
             BotCommand("chitieu", "Báo cáo chi tiêu tháng này"),
             BotCommand("baocao", "Xuất Excel chi tiêu: /baocao hoặc /baocao 6"),
+            BotCommand("hanmuc", "Hạn mức tháng: /hanmuc ăn uống 3tr"),
             BotCommand("undo", "Xóa khoản thu/chi vừa ghi nhầm"),
             BotCommand("remind", "Đặt nhắc: /remind 8h sáng mai họp"),
             BotCommand("reminders", "Xem các lời nhắc sắp tới"),
@@ -60,6 +71,27 @@ async def setup_commands(app: Application) -> None:
             BotCommand("reset", "Xóa lịch sử chat, bắt đầu lại"),
         ]
     )
+
+
+async def gatekeeper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Chặn người lạ — chạy TRƯỚC mọi handler khác (đăng ký ở group -1).
+
+    Bot Telegram là công khai, ai cũng nhắn được; mỗi tin của người lạ là
+    tiền API của bạn. ApplicationHandlerStop = dừng xử lý update này luôn,
+    không cho rơi xuống các handler phía sau.
+    """
+    chat = update.effective_chat
+    if chat is None or chat.id in ALLOWED_CHAT_IDS:
+        return
+
+    # In chat_id vào log để bạn biết ai đang gõ cửa (muốn cho người nhà
+    # dùng chung thì thêm id này vào ALLOWED_CHAT_IDS trong .env)
+    logger.warning("Chặn chat lạ: id=%s (%s)", chat.id, chat.effective_name or "?")
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            "Xin lỗi, mình là trợ lý cá nhân, chỉ phục vụ chủ của mình thôi. 🙏"
+        )
+    raise ApplicationHandlerStop
 
 
 def main() -> None:
@@ -81,6 +113,16 @@ def main() -> None:
         .build()
     )
 
+    # Gác cổng ở group -1: PTB xử lý theo group từ nhỏ đến lớn, nên hàm này
+    # luôn chạy trước. Chỉ bật khi .env có khai báo danh sách cho phép.
+    if ALLOWED_CHAT_IDS:
+        app.add_handler(TypeHandler(Update, gatekeeper), group=-1)
+    else:
+        logger.warning(
+            "ALLOWED_CHAT_IDS đang trống — AI CŨNG nhắn được với bot (tốn tiền API của bạn). "
+            "Nên điền chat_id của bạn vào .env."
+        )
+
     app.add_handler(CommandHandler("start", handlers.start_command))
     app.add_handler(CommandHandler("reset", handlers.reset_command))
     app.add_handler(CommandHandler("note", handlers.note_command))
@@ -89,12 +131,15 @@ def main() -> None:
     app.add_handler(CommandHandler("chi", handlers.chi_command))
     app.add_handler(CommandHandler("chitieu", handlers.chitieu_command))
     app.add_handler(CommandHandler("baocao", handlers.baocao_command))
+    app.add_handler(CommandHandler("hanmuc", handlers.hanmuc_command))
     app.add_handler(CommandHandler("undo", handlers.undo_command))
     app.add_handler(CommandHandler("remind", handlers.remind_command))
     app.add_handler(CommandHandler("reminders", handlers.reminders_command))
     app.add_handler(CommandHandler("delremind", handlers.delremind_command))
     app.add_handler(CommandHandler("docs", handlers.docs_command))
     app.add_handler(CommandHandler("deldoc", handlers.deldoc_command))
+    # Nút "↩️ Hoàn tác" dưới tin "Đã ghi" — pattern lọc đúng callback của nút này
+    app.add_handler(CallbackQueryHandler(handlers.undo_button, pattern=r"^undo:"))
     # Nhận file gửi vào chat (PDF/Word/TXT) để đọc vào bộ nhớ tài liệu (RAG)
     app.add_handler(MessageHandler(filters.Document.ALL, handlers.handle_document))
     # Nhận ảnh (hóa đơn) -> Claude Vision đọc và ghi sổ chi tiêu

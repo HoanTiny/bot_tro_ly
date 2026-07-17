@@ -36,6 +36,17 @@ SYSTEM_PROMPT = (
 
 MAX_HISTORY_MESSAGES = 20  # giới hạn số tin nhắn nhớ, tránh phình quá to
 
+# Danh sách chat_id ĐƯỢC PHÉP dùng bot (phân cách bằng dấu phẩy trong .env).
+# Bot Telegram là công khai: ai tìm ra username cũng nhắn được — mỗi tin nhắn
+# của người lạ là tiền API Claude của BẠN. Để trống thì cho phép tất cả
+# (tiện lúc mới cài, nhưng nên điền ngay khi biết chat_id của mình —
+# bot sẽ in chat_id của người lạ vào log để bạn thêm người nhà nếu muốn).
+ALLOWED_CHAT_IDS = frozenset(
+    int(part)
+    for part in os.getenv("ALLOWED_CHAT_IDS", "").replace(";", ",").split(",")
+    if part.strip().lstrip("-").isdigit()
+)
+
 # Các nhóm chi tiêu hợp lệ — liệt kê cứng để Claude không tự bịa nhóm mới
 EXPENSE_CATEGORIES = ["ăn uống", "đi lại", "mua sắm", "hóa đơn", "giải trí", "sức khỏe", "khác"]
 

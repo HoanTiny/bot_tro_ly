@@ -1,5 +1,6 @@
 """
-Xuất báo cáo chi tiêu ra file Excel (.xlsx) bằng openpyxl.
+Xuất báo cáo chi tiêu: file Excel (.xlsx) bằng openpyxl và biểu đồ PNG
+bằng matplotlib.
 
 Tách thành module riêng, không đụng Telegram hay Claude: nhận dữ liệu vào,
 trả file ra — nhờ vậy test được offline (tạo file trong RAM rồi đọc lại).
@@ -7,10 +8,70 @@ trả file ra — nhờ vậy test được offline (tạo file trong RAM rồi 
 
 from io import BytesIO
 
+import matplotlib
+
+# Backend "Agg" = vẽ thẳng ra ảnh, không cần màn hình — bắt buộc khi chạy
+# trên server/bot (backend mặc định sẽ đòi mở cửa sổ đồ họa và treo).
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
+from utils import format_money
+
 HEADER_FONT = Font(bold=True)
+
+# Màu biểu đồ: MỘT màu duy nhất cho các cột (đây là 1 chuỗi số liệu — tô mỗi
+# nhóm một màu chỉ gây nhiễu), chữ màu xám đậm/nhạt cho phần phụ trợ.
+BAR_COLOR = "#2563eb"
+TEXT_COLOR = "#111827"
+MUTED_COLOR = "#6b7280"
+
+
+def build_month_chart(summary: list[tuple[str, int]], year_month: str) -> BytesIO:
+    """Vẽ biểu đồ cột ngang "chi theo nhóm" của 1 tháng, trả về PNG trong RAM.
+
+    Chọn cột NGANG thay vì cột đứng/bánh tròn: tên nhóm tiếng Việt dài đọc
+    thẳng hàng không phải xoay chữ, và so độ dài cột dễ hơn so góc miếng bánh.
+    Số tiền ghi thẳng ở đầu mỗi cột nên bỏ luôn trục hoành cho sạch.
+
+    summary: [(category, tổng), ...] nhóm lớn nhất trước (từ db.get_month_summary)
+    """
+    # barh vẽ từ dưới lên — đảo danh sách để nhóm chi nhiều nhất nằm TRÊN CÙNG
+    categories = [category for category, _ in reversed(summary)]
+    amounts = [amount for _, amount in reversed(summary)]
+
+    # Cao ~0.5 inch mỗi cột: 2 nhóm hay 7 nhóm đều thoáng như nhau
+    fig, ax = plt.subplots(figsize=(6.4, 0.5 * len(summary) + 1.1), dpi=150)
+    bars = ax.barh(categories, amounts, color=BAR_COLOR, height=0.62)
+
+    # Nhãn số tiền ở đầu cột — cách đầu cột 1.5% chiều dài cột lớn nhất
+    gap = max(amounts) * 0.015
+    for bar, amount in zip(bars, amounts):
+        ax.text(
+            bar.get_width() + gap, bar.get_y() + bar.get_height() / 2,
+            format_money(amount), va="center", fontsize=10, color=TEXT_COLOR,
+        )
+
+    ax.set_title(
+        f"Chi theo nhóm — tháng {year_month[5:7]}/{year_month[:4]}",
+        fontsize=12, color=TEXT_COLOR, loc="left", pad=12,
+    )
+    # Dọn khung: bỏ 4 đường viền + trục hoành (nhãn số đã nói hết rồi),
+    # chừa 18% bên phải cho nhãn số của cột dài nhất khỏi tràn ra ngoài ảnh
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.xaxis.set_visible(False)
+    ax.tick_params(axis="y", length=0, labelsize=10, labelcolor=TEXT_COLOR)
+    ax.set_xlim(0, max(amounts) * 1.18)
+    fig.tight_layout()
+
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", facecolor="white")
+    plt.close(fig)  # giải phóng bộ nhớ — matplotlib giữ figure mãi nếu không đóng
+    buffer.seek(0)
+    return buffer
 
 
 def build_month_report(
