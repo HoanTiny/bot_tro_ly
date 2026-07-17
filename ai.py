@@ -281,22 +281,37 @@ async def ask_claude(chat_id: int, user_message: str) -> str:
     db.add_message(chat_id, "user", user_message)
     messages = db.get_history(chat_id, MAX_HISTORY_MESSAGES)
 
+    # Prompt caching: mỗi tin nhắn đều gửi lại nguyên bộ TOOLS + system prompt —
+    # phần này giống hệt nhau giữa các lần gọi, nên nhờ API "ghi nhớ" (cache)
+    # để lần sau chỉ trả ~10% giá token cho phần đó. Cache khớp theo TIỀN TỐ:
+    # chỉ cần 1 byte khác là hỏng từ đó trở đi — vì vậy phải tách làm 2 khối:
+    # - Khối 1 (ổn định, đánh dấu cache_control): tính cách bot + hướng dẫn tool
+    # - Khối 2 (thay đổi theo ngày): "Hôm nay là..." — nằm SAU điểm cache,
+    #   đổi ngày cũng không làm hỏng phần đã cache.
     # Claude không tự biết hôm nay là ngày nào — phải nói trong system prompt
     # để "tháng này", "tháng trước" quy đổi ra đúng tháng.
-    system = (
-        SYSTEM_PROMPT
-        + f"\nHôm nay là {datetime.now().strftime('%d/%m/%Y')}."
-        + "\nBạn có công cụ tra cứu sổ thu chi của người dùng — hãy dùng khi được hỏi về chi tiêu."
-        + "\nBạn cũng có công cụ sửa (update_expense) và xóa (delete_expense) khoản đã ghi — "
-        + "chỉ dùng khi người dùng yêu cầu rõ ràng, luôn gọi expense_list trước để lấy đúng id, "
-        + "và sau khi sửa/xóa phải nói lại chính xác đã thay đổi gì."
-        + "\nNgười dùng không nói tháng nào thì hiểu là THÁNG NÀY, cứ thế làm — đừng hỏi lại. "
-        + "Chỉ hỏi lại khi thật sự mơ hồ (ví dụ: có 2 khoản trùng tên, không rõ xóa khoản nào)."
-        + "\nBạn có công cụ tìm kiếm trong tài liệu người dùng đã gửi (search_documents) — "
-        + "hãy dùng khi câu hỏi có thể liên quan tài liệu của họ. Khi trả lời từ tài liệu, "
-        + "nêu tên tài liệu nguồn. Nếu không tìm thấy, nói thẳng là không thấy — đừng bịa."
-        + "\nSố tiền là VND, viết kiểu 15.000đ."
-    )
+    system = [
+        {
+            "type": "text",
+            "text": (
+                SYSTEM_PROMPT
+                + "\nBạn có công cụ tra cứu sổ thu chi của người dùng — hãy dùng khi được hỏi về chi tiêu."
+                + "\nBạn cũng có công cụ sửa (update_expense) và xóa (delete_expense) khoản đã ghi — "
+                + "chỉ dùng khi người dùng yêu cầu rõ ràng, luôn gọi expense_list trước để lấy đúng id, "
+                + "và sau khi sửa/xóa phải nói lại chính xác đã thay đổi gì."
+                + "\nNgười dùng không nói tháng nào thì hiểu là THÁNG NÀY, cứ thế làm — đừng hỏi lại. "
+                + "Chỉ hỏi lại khi thật sự mơ hồ (ví dụ: có 2 khoản trùng tên, không rõ xóa khoản nào)."
+                + "\nBạn có công cụ tìm kiếm trong tài liệu người dùng đã gửi (search_documents) — "
+                + "hãy dùng khi câu hỏi có thể liên quan tài liệu của họ. Khi trả lời từ tài liệu, "
+                + "nêu tên tài liệu nguồn. Nếu không tìm thấy, nói thẳng là không thấy — đừng bịa."
+                + "\nSố tiền là VND, viết kiểu 15.000đ."
+            ),
+            # Điểm cache đặt ở khối system CUỐI CÙNG ổn định — API xếp
+            # tools trước system, nên một điểm này cache được cả TOOLS lẫn system
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": f"Hôm nay là {datetime.now().strftime('%d/%m/%Y')}."},
+    ]
 
     # Giới hạn số vòng để phòng Claude gọi tool mãi không dừng
     for _ in range(5):
