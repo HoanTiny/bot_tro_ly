@@ -42,6 +42,15 @@ def test_tien_thu():
     assert _one("bán đồ cũ 300k")["type"] == "thu"
 
 
+def test_tien_kiem_duoc_khong_bi_xep_thanh_chi():
+    # Lỗi 19/07/2026: "chạy grab thu đc 103k" bị ghi thành CHI nhóm đi lại
+    # vì thấy chữ "grab" — dù "thu đc" nghĩa là tiền KIẾM ĐƯỢC (thu).
+    e = _one("làm thêm chạy grab thu đc 103k")
+    assert e["type"] == "thu" and e["category"] == "thu nhập" and e["amount"] == 103000
+    assert _one("kiếm được 500k tiền ship")["type"] == "thu"
+    assert _one("chạy xe ôm được trả 80k")["type"] == "thu"
+
+
 def test_ban_khac_ban():
     # "bán" (thu) phải phân biệt với "bàn" (mua đồ) — so khớp có dấu
     assert _one("mua cái bàn 2tr")["type"] == "chi"

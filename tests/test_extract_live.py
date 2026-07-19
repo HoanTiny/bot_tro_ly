@@ -104,3 +104,12 @@ def test_mot_so_tien_chung_cach_noi_khac():
     result = extract("sáng nay ăn phở với gửi xe tổng cộng 45k")
     assert len(result) == 1, f"phải là 1 khoản gộp: {result}"
     assert result[0]["amount"] == 45_000
+
+
+def test_lam_them_kiem_tien_la_thu_khong_phai_chi():
+    """Lỗi 19/07/2026: 'chạy grab thu đc 103k' — có chữ 'grab' nhưng là
+    tiền KIẾM ĐƯỢC (thu), không phải chi tiền đi lại."""
+    result = extract("làm thêm chạy grab thu đc 103k")
+    assert len(result) == 1
+    assert result[0]["type"] == "thu", f"phải là thu, nhận được: {result}"
+    assert result[0]["amount"] == 103_000

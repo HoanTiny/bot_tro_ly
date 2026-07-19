@@ -44,8 +44,16 @@ UNSURE_WORDS = [
 # (riêng "hôm qua"/"hôm kia" thì parser tự xử lý được)
 COMPLEX_TIME_WORDS = ["thứ", "tuần trước", "tháng trước", "chủ nhật", "hôm 1", "hôm 2", "hôm 3"]
 
-# Từ khóa nhận diện tiền THU
-INCOME_WORDS = ["lương", "thưởng", "bán", "hoàn tiền", "hoàn", "trúng", "nhận", "cho tiền"]
+# Từ khóa nhận diện tiền THU. Gồm cả các cụm "kiếm được" kiểu việc làm thêm
+# ("chạy grab thu đc 103k", "kiếm được 500k") — nếu thiếu, parser sẽ thấy
+# "grab" rồi xếp nhầm thành CHI nhóm đi lại. Ưu tiên CỤM RÕ NGHĨA thay vì
+# từ đơn dễ nhầm: "thu được" (thu nhập) chứ không phải "thu" đơn (còn nghĩa
+# "thu hộ", "mùa thu"); câu mơ hồ cứ để rơi xuống AI.
+INCOME_WORDS = [
+    "lương", "thưởng", "bán", "hoàn tiền", "hoàn", "trúng", "nhận", "cho tiền",
+    "thu được", "thu đc", "thu nhập", "kiếm được", "kiếm đc",
+    "tiền công", "trả công", "được trả", "tiền boa", "tiền tip",
+]
 
 # Từ khóa phân nhóm chi tiêu (so khớp KHÔNG DẤU để "an sang" cũng trúng)
 CATEGORY_KEYWORDS = {
